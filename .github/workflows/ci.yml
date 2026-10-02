@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Config-based hooks need a recent Git.
+      - name: Update Git (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo add-apt-repository -y ppa:git-core/ppa
+          sudo apt-get update
+          sudo apt-get install -y git
+
+      - name: Update Git (macOS)
+        if: runner.os == 'macOS'
+        run: brew upgrade git || brew install git
+
+      - run: git --version
+
+      - run: go vet ./...
+
+      - name: Install sops
+        run: go run ./cmd/git-sops install-sops
+
+      - run: go test ./...
