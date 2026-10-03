@@ -86,6 +86,10 @@ func ConfigureLocal(e *Env) error {
 			{"filter.sops.clean", self + " clean %f"},
 			{"filter.sops.smudge", self + " smudge %f"},
 			{"filter.sops.required", "true"},
+			// cachetextconv stays off: it would store decrypted text in the repository.
+			{"diff.sops.textconv", self + " textconv"},
+			{"merge.sops.name", "SOPS-aware three-way merge"},
+			{"merge.sops.driver", self + " merge %O %A %B %P %L"},
 			{"hook.sops-index.command", self + " verify"},
 		}
 		for _, kv := range settings {

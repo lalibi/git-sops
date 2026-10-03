@@ -67,7 +67,7 @@ func TestUpdateAttributesReplacesManagedBlockOnly(t *testing.T) {
 
 	got, _ := os.ReadFile(path)
 	want := "*.md text eol=lf\n" +
-		AttributesBegin + "\n/secrets/** filter=sops -text\n" + AttributesEnd + "\n" +
+		AttributesBegin + "\n/secrets/** filter=sops diff=sops merge=sops -text\n" + AttributesEnd + "\n" +
 		"*.png binary\n"
 	if string(got) != want {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)
@@ -87,7 +87,7 @@ func TestUpdateAttributesMigratesGitCrypt(t *testing.T) {
 	}
 
 	got, _ := os.ReadFile(path)
-	if !strings.HasPrefix(string(got), "secrets/** filter=sops -text\n") {
+	if !strings.HasPrefix(string(got), "secrets/** filter=sops merge=sops diff=sops -text\n") {
 		t.Errorf("unexpected rewrite: %q", got)
 	}
 }

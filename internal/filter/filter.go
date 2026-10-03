@@ -14,6 +14,10 @@ import (
 func Smudge(s *sopsx.Client, path string, input []byte) ([]byte, error) {
 	out, err := s.Decrypt(path, input)
 	if err != nil {
+		// A merge conflict leaves plaintext with conflict markers; real ciphertext must still fail loudly.
+		if !s.IsEncrypted(path, input) {
+			return input, nil
+		}
 		return nil, fmt.Errorf("SOPS decrypt failed for '%s': %w", path, err)
 	}
 	return out, nil

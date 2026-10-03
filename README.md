@@ -372,19 +372,19 @@ Git's `filter` attribute activates a named clean/smudge filter for a path.
 A protected directory:
 
 ```gitattributes
-/secrets/** filter=sops -text
+/secrets/** filter=sops diff=sops merge=sops -text
 ```
 
 A protected file in the repository root:
 
 ```gitattributes
-/appsettings.json filter=sops -text
+/appsettings.json filter=sops diff=sops merge=sops -text
 ```
 
 A protected file inside a directory that also contains normal unencrypted files:
 
 ```gitattributes
-/src/Web/appsettings.Production.json filter=sops -text
+/src/Web/appsettings.Production.json filter=sops diff=sops merge=sops -text
 ```
 
 These rules do **not** encrypt sibling files.
@@ -402,7 +402,7 @@ src/Web/
 with:
 
 ```gitattributes
-/src/Web/appsettings.Production.json filter=sops -text
+/src/Web/appsettings.Production.json filter=sops diff=sops merge=sops -text
 ```
 
 Only the single JSON file is filtered.
@@ -412,8 +412,8 @@ Only the single JSON file is filtered.
 If that is genuinely desired:
 
 ```gitattributes
-**/appsettings.json filter=sops -text
-**/appsettings.*.json filter=sops -text
+**/appsettings.json filter=sops diff=sops merge=sops -text
+**/appsettings.*.json filter=sops diff=sops merge=sops -text
 ```
 
 Be careful: broad patterns may encrypt files that were intended to remain public.
@@ -421,6 +421,15 @@ Be careful: broad patterns may encrypt files that were intended to remain public
 ## 7.2 Why `-text`
 
 `-text` disables Git EOL normalization for protected paths. The filter owns the exact transformation between working-tree bytes and repository bytes.
+
+## 7.3 Diff and merge drivers
+
+`diff=sops` and `merge=sops` make `git diff`, `git log -p`, `git show` and `git merge` work on the decrypted content instead of ciphertext.
+
+- **diff**: `diff.sops.textconv` runs `git-sops textconv`, which decrypts each side. If a blob cannot be decrypted (for example the key is missing) the ciphertext is shown instead. `diff.sops.cachetextconv` is deliberately left off, because Git would store the decrypted text in the repository.
+- **merge**: `merge.sops.driver` runs `git-sops merge`, which decrypts base, ours and theirs, merges the plaintext with `git merge-file`, and encrypts the result. A clean merge produces new ciphertext that is staged for you. On a conflict the working-tree file holds plaintext conflict markers; resolve them and run `git add`, which encrypts the resolved file. Unresolved markers are encrypted like any other content, so resolve them before committing.
+
+Both drivers are configured by `git-sops init` and `git-sops join`. Existing repositories pick up the attributes by running `git-sops init` again. A temporary plaintext copy of the three versions exists in your temp directory while a merge runs and is removed afterwards.
 
 ---
 
@@ -1129,7 +1138,7 @@ The migration command:
 2. verifies that `git-crypt` is installed;
 3. displays `git-crypt status -e`;
 4. generates/imports an age identity;
-5. rewrites git-crypt filter attributes to `filter=sops -text`;
+5. rewrites git-crypt filter attributes to `filter=sops diff=sops merge=sops -text`;
 6. creates `.sops.yaml`;
 7. configures the local SOPS filter and pre-commit hook;
 8. stages the currently plaintext protected files through SOPS;
@@ -1149,8 +1158,8 @@ If the old `.gitattributes` contains:
 replace it with:
 
 ```gitattributes
-/secrets/** filter=sops -text
-/appsettings.json filter=sops -text
+/secrets/** filter=sops diff=sops merge=sops -text
+/appsettings.json filter=sops diff=sops merge=sops -text
 ```
 
 Create the corresponding `.sops.yaml`.
@@ -1310,7 +1319,22 @@ SOPS supports multiple age public recipients.
 
 Adding a new recipient does not require sharing an existing private key.
 
-Removing access is more subtle:
+Removing access is more subtle. Run, from a machine that is itself an authorized recipient:
+
+```text
+git-sops remove-recipient age1...
+```
+
+The command removes the recipient from the managed `.sops.yaml`, re-encrypts every tracked protected file for the remaining recipients, keeps your working-tree files as plaintext and validates the index. It refuses to remove the last recipient or the recipient of your own identity. Review, then commit and push:
+
+```text
+git status
+git diff --cached
+git commit -m "Revoke SOPS access"
+git push
+```
+
+Without the command, the manual steps are:
 
 - remove the recipient from `.sops.yaml`;
 - re-encrypt / rotate the protected files;
@@ -1420,6 +1444,20 @@ git show HEAD:appsettings.json
 git worktree list
 ```
 
+## Decrypt without Git
+
+`git-sops decrypt` needs only `sops` and an age key, not Git or the repository filter. It suits CI and deploy scripts.
+
+```text
+# one file to stdout
+git-sops decrypt secrets/db.json
+
+# every encrypted file under a directory, overwritten with plaintext
+git-sops decrypt --in-place --recursive secrets/
+```
+
+When walking a directory, files that are not SOPS ciphertext are left alone. Only decrypt in place in a throwaway checkout: the files become plaintext on disk.
+
 ---
 
 # 28. Files created by the automation
@@ -1438,15 +1476,46 @@ The behavior lives in the `git-sops` executable:
 | `init` | Configure a repository (also upgrades legacy PowerShell setups) |
 | `join` | Fresh clone / new machine: configure filters and decrypt the working tree |
 | `add-recipient` | Authorize a new age recipient and re-encrypt protected files |
+| `remove-recipient` | Revoke an age recipient and re-encrypt protected files without it |
 | `migrate-git-crypt` | Replace git-crypt attributes with SOPS |
 | `clean`, `smudge` | Binary-safe Git filters (invoked by Git) |
+| `textconv` | Git diff driver: shows decrypted content in `git diff` and `git log -p` (invoked by Git) |
+| `merge` | Git merge driver: three-way merges encrypted files through their plaintext (invoked by Git) |
+| `decrypt` | Decrypt files without Git, to stdout or in place (see [section 27](#27-reference-commands)) |
 | `verify` | Fail-closed pre-commit check that every protected index blob is SOPS ciphertext |
 | `check` | Read-only report on Git, SOPS, your age key and the repository's filter, hook and index |
 | `install-sops` | Download and verify a SOPS release |
 
 ---
 
-# 29. Upstream references
+# 29. Releasing (maintainers)
+
+Releases are built by [GoReleaser](https://goreleaser.com) from a version tag. Pushing a tag that starts with `v` runs `.github/workflows/release.yml`, which builds archives for Windows, Linux and macOS (amd64 and arm64), writes `checksums.txt`, and publishes a GitHub release with generated notes. The tag becomes the version printed by `git-sops --version`.
+
+1. Make sure the `ci` workflow is green on `main`.
+2. Pick the next [semantic version](https://semver.org), for example `v0.2.0`.
+3. Tag and push:
+
+```text
+git switch main
+git pull
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin v0.2.0
+```
+
+4. Watch the `release` workflow in the repository's Actions tab, then check that the release lists all archives and `checksums.txt`.
+
+To preview the build without publishing, install GoReleaser and run:
+
+```text
+goreleaser release --snapshot --clean
+```
+
+The archives land in `dist/`. A tag also makes `go install github.com/lalibi/git-sops/cmd/git-sops@v0.2.0` work. A major version of 2 or higher requires a `/v2` suffix in the module path. If a release fails after the tag was pushed, fix the problem, delete the tag locally and on the remote (`git push origin :refs/tags/v0.2.0`) and tag again, unless the release was already published.
+
+---
+
+# 30. Upstream references
 
 - SOPS documentation: https://getsops.io/docs/
 - SOPS installation: https://getsops.io/docs/installation/
@@ -1461,7 +1530,7 @@ The behavior lives in the `git-sops` executable:
 
 ---
 
-# 30. Final model
+# 31. Final model
 
 Once configured, normal day-to-day work is deliberately boring:
 

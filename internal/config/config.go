@@ -133,8 +133,8 @@ func UpdateAttributes(root string, specs []Spec, migrateGitCrypt bool) error {
 			if !gitCryptFilter.MatchString(line) {
 				continue
 			}
-			line = gitCryptFilter.ReplaceAllString(line, "filter=sops")
-			line = gitCryptDiff.ReplaceAllString(line, "")
+			line = gitCryptFilter.ReplaceAllString(line, "filter=sops merge=sops")
+			line = gitCryptDiff.ReplaceAllString(line, " diff=sops")
 			if !hasNoText.MatchString(line) {
 				line += " -text"
 			}
@@ -158,7 +158,7 @@ func UpdateAttributes(root string, specs []Spec, migrateGitCrypt bool) error {
 
 	block := []string{AttributesBegin}
 	for _, s := range specs {
-		block = append(block, s.AttributePattern+" filter=sops -text")
+		block = append(block, s.AttributePattern+" filter=sops diff=sops merge=sops -text")
 	}
 	block = append(block, AttributesEnd)
 

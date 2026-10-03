@@ -60,11 +60,15 @@ func newRootCommand() *cobra.Command {
 		newInitCommand(&opts),
 		newJoinCommand(&opts),
 		newAddRecipientCommand(&opts),
+		newRemoveRecipientCommand(&opts),
 		newMigrateCommand(&opts),
 		newCheckCommand(&opts),
 		newInstallSopsCommand(),
+		newDecryptCommand(),
 		newFilterCommand("clean"),
 		newFilterCommand("smudge"),
+		newTextconvCommand(),
+		newMergeCommand(),
 		newVerifyCommand(),
 	)
 	return root
@@ -109,6 +113,21 @@ func newAddRecipientCommand(o *setup.Options) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "age public recipient (repeatable)")
+	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage .sops.yaml")
+	return cmd
+}
+
+func newRemoveRecipientCommand(o *setup.Options) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "remove-recipient [age1...]",
+		Short:   "Revoke age recipients and re-encrypt protected files without them",
+		Example: "  git-sops remove-recipient age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p",
+		RunE: func(_ *cobra.Command, args []string) error {
+			o.Recipients = append(o.Recipients, args...)
+			return setup.RemoveRecipient(*o)
+		},
+	}
+	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "age public recipient to remove (repeatable)")
 	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage .sops.yaml")
 	return cmd
 }
@@ -217,6 +236,84 @@ func runFilter(mode, path string) error {
 
 	_, err = os.Stdout.Write(out)
 	return err
+}
+
+func sopsClient() (*sopsx.Client, error) {
+	sopsExe, err := sopsx.Find()
+	if err != nil {
+		return nil, err
+	}
+	keyFile, _ := agekey.KeyFile()
+	return &sopsx.Client{Exe: sopsExe, KeyFile: keyFile}, nil
+}
+
+func newTextconvCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:    "textconv <file>",
+		Short:  "Git diff textconv driver: print the decrypted content of a blob (invoked by Git)",
+		Args:   cobra.ExactArgs(1),
+		Hidden: true,
+		RunE: func(_ *cobra.Command, args []string) error {
+			client, err := sopsClient()
+			if err != nil {
+				return err
+			}
+
+			// Git passes a temporary file named <random>_<original name>, so the extension is kept.
+			input, err := os.ReadFile(args[0])
+			if err != nil {
+				return err
+			}
+			_, err = os.Stdout.Write(filter.TextConv(client, args[0], input))
+			return err
+		},
+	}
+}
+
+func newMergeCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:    "merge <base> <ours> <theirs> <path> [marker-size]",
+		Short:  "Git merge driver: three-way merge of encrypted files (invoked by Git)",
+		Args:   cobra.RangeArgs(4, 5),
+		Hidden: true,
+		RunE: func(_ *cobra.Command, args []string) error {
+			client, err := sopsClient()
+			if err != nil {
+				return err
+			}
+			g, err := gitx.New("")
+			if err != nil {
+				return err
+			}
+
+			basePath, oursPath, theirsPath, path := args[0], args[1], args[2], args[3]
+			markerSize := ""
+			if len(args) == 5 {
+				markerSize = args[4]
+			}
+
+			var blobs [3][]byte
+			for i, p := range []string{basePath, oursPath, theirsPath} {
+				if blobs[i], err = os.ReadFile(p); err != nil {
+					return err
+				}
+			}
+
+			out, conflicted, err := filter.Merge(g, client, path, blobs[0], blobs[1], blobs[2], markerSize)
+			if err != nil {
+				return err
+			}
+
+			// Git takes the result from the 'ours' file; a non-zero exit marks it as conflicted.
+			if err := os.WriteFile(oursPath, out, 0o600); err != nil {
+				return err
+			}
+			if conflicted {
+				return &setup.ExitCodeError{Code: 1, Message: "git-sops: merge conflict in " + path + "; resolve the markers in the working tree, then git add it"}
+			}
+			return nil
+		},
+	}
 }
 
 func newVerifyCommand() *cobra.Command {

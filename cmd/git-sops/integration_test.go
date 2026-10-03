@@ -376,3 +376,181 @@ func TestInitUpgradesLegacyPowerShellSetup(t *testing.T) {
 		t.Errorf("filter not repointed: %s", got)
 	}
 }
+
+func recipientIn(t *testing.T, out string) string {
+	t.Helper()
+	for _, f := range strings.Fields(out) {
+		if _, err := age.ParseX25519Recipient(f); err == nil {
+			return f
+		}
+	}
+	t.Fatalf("no recipient found in:\n%s", out)
+	return ""
+}
+
+func TestRemoveRecipientRevokesAccess(t *testing.T) {
+	s := newSandbox(t)
+	repo := protectedRepo(t, s)
+	s.git(repo, "commit", "-m", "protect secrets")
+
+	own := recipientIn(t, s.mustGitSops(repo, "check"))
+	if r := s.gitSops(repo, "remove-recipient", own); r.code == 0 || !strings.Contains(r.out, "your own") {
+		t.Fatalf("removing your own recipient must be refused (code %d):\n%s", r.code, r.out)
+	}
+
+	bob := s.as("bob")
+	clone := filepath.Join(t.TempDir(), "bob")
+	s.git(filepath.Dir(clone), "clone", repo, clone)
+	bobRecipient := recipientIn(t, bob.gitSops(clone, "join").out)
+
+	s.mustGitSops(repo, "add-recipient", bobRecipient)
+	s.git(repo, "commit", "-m", "add bob")
+
+	s.mustGitSops(repo, "remove-recipient", bobRecipient)
+	s.git(repo, "commit", "-m", "remove bob")
+
+	if got := read(t, filepath.Join(repo, "secrets", "db.json")); got != jsonSecret {
+		t.Errorf("maintainer plaintext changed: %q", got)
+	}
+	if sops := read(t, filepath.Join(repo, ".sops.yaml")); strings.Contains(sops, bobRecipient) {
+		t.Error("bob is still listed in .sops.yaml")
+	}
+
+	s.git(clone, "pull", "--ff-only")
+	if r := bob.gitSops(clone, "join"); r.code == 0 {
+		t.Fatalf("bob should no longer be able to decrypt:\n%s", r.out)
+	}
+
+	if r := s.gitSops(repo, "remove-recipient", bobRecipient); r.code == 0 {
+		t.Error("removing a recipient that is not listed should fail")
+	}
+}
+
+func TestDecryptWithoutGit(t *testing.T) {
+	s := newSandbox(t)
+	repo := protectedRepo(t, s)
+	s.git(repo, "commit", "-m", "protect secrets")
+
+	clone := filepath.Join(t.TempDir(), "clone")
+	s.git(filepath.Dir(clone), "clone", repo, clone)
+
+	r := s.gitSops(clone, "decrypt", filepath.Join("secrets", "token.txt"))
+	if r.code != 0 || r.out != textSecret {
+		t.Fatalf("decrypt to stdout (code %d) = %q", r.code, r.out)
+	}
+	if got := read(t, filepath.Join(clone, "secrets", "token.txt")); strings.Contains(got, "plain text token") {
+		t.Error("decrypting to stdout must not touch the file")
+	}
+
+	if r := s.gitSops(clone, "decrypt", "secrets"); r.code == 0 {
+		t.Error("a directory needs --in-place --recursive")
+	}
+
+	s.mustGitSops(clone, "decrypt", "--in-place", "--recursive", "secrets")
+	if got := read(t, filepath.Join(clone, "secrets", "db.json")); got != jsonDecrypted {
+		t.Errorf("decrypted json = %q", got)
+	}
+	if got := read(t, filepath.Join(clone, "secrets", "token.txt")); got != textSecret {
+		t.Errorf("decrypted text = %q", got)
+	}
+
+	// A second run finds only plaintext and leaves it alone.
+	if out := s.mustGitSops(clone, "decrypt", "--in-place", "--recursive", "secrets"); !strings.Contains(out, "Decrypted 0") {
+		t.Errorf("unexpected second run output:\n%s", out)
+	}
+}
+
+func TestDiffShowsDecryptedChanges(t *testing.T) {
+	s := newSandbox(t)
+	repo := protectedRepo(t, s)
+	s.git(repo, "commit", "-m", "protect secrets")
+
+	write(t, filepath.Join(repo, "secrets", "db.json"), `{"password": "changed"}`+"\n")
+	s.git(repo, "add", "-A")
+	s.git(repo, "commit", "-m", "rotate password")
+
+	diff := s.git(repo, "diff", "HEAD~1", "HEAD", "--", "secrets/db.json")
+	if !strings.Contains(diff, "hunter2") || !strings.Contains(diff, "changed") {
+		t.Errorf("diff should show decrypted values:\n%s", diff)
+	}
+	if strings.Contains(diff, "ENC[") {
+		t.Errorf("diff still shows ciphertext:\n%s", diff)
+	}
+	if r := s.run(repo, "git", "config", "--local", "diff.sops.cachetextconv"); r.code == 0 && strings.TrimSpace(r.out) == "true" {
+		t.Error("cachetextconv would store plaintext in the repository")
+	}
+}
+
+// A line between the edited keys is needed: Git treats edits on adjacent lines as a conflict.
+const mergeBase = `{"a": "1", "m": "m", "b": "2"}` + "\n"
+
+// mergeRepo has secrets/app.json on main and a feature branch that diverges from it.
+func mergeRepo(t *testing.T, s *sandbox, mainEdit, featureEdit string) string {
+	t.Helper()
+
+	repo := protectedRepo(t, s)
+	app := filepath.Join(repo, "secrets", "app.json")
+	write(t, app, mergeBase)
+	s.git(repo, "add", "-A")
+	s.git(repo, "commit", "-m", "protect secrets")
+
+	s.git(repo, "switch", "-c", "feature")
+	write(t, app, featureEdit)
+	s.git(repo, "commit", "-am", "feature edit")
+
+	s.git(repo, "switch", "main")
+	write(t, app, mainEdit)
+	s.git(repo, "commit", "-am", "main edit")
+	return repo
+}
+
+func TestMergeCombinesEncryptedChanges(t *testing.T) {
+	s := newSandbox(t)
+	repo := mergeRepo(t, s,
+		`{"a": "1", "m": "m", "b": "main"}`+"\n",
+		`{"a": "feature", "m": "m", "b": "2"}`+"\n")
+
+	s.git(repo, "merge", "--no-edit", "feature")
+
+	got := read(t, filepath.Join(repo, "secrets", "app.json"))
+	if !strings.Contains(got, `"a": "feature"`) || !strings.Contains(got, `"b": "main"`) {
+		t.Errorf("merged plaintext = %q", got)
+	}
+
+	blob := s.git(repo, "cat-file", "blob", ":secrets/app.json")
+	if strings.Contains(blob, "feature") || strings.Contains(blob, "main") || !strings.Contains(blob, "sops") {
+		t.Errorf("merged index blob is not ciphertext:\n%s", blob)
+	}
+	if status := s.git(repo, "status", "--porcelain"); strings.TrimSpace(status) != "" {
+		t.Errorf("tree not clean after merge:\n%s", status)
+	}
+}
+
+func TestMergeConflictLeavesMarkersThenEncryptsResolution(t *testing.T) {
+	s := newSandbox(t)
+	repo := mergeRepo(t, s,
+		`{"a": "main", "m": "m", "b": "2"}`+"\n",
+		`{"a": "feature", "m": "m", "b": "2"}`+"\n")
+
+	r := s.run(repo, "git", "merge", "--no-edit", "feature")
+	if r.code == 0 || !strings.Contains(r.out, "CONFLICT") {
+		t.Fatalf("expected a merge conflict (code %d):\n%s", r.code, r.out)
+	}
+
+	app := filepath.Join(repo, "secrets", "app.json")
+	if got := read(t, app); !strings.Contains(got, "<<<<<<<") || !strings.Contains(got, "main") || !strings.Contains(got, "feature") {
+		t.Fatalf("working tree should hold plaintext conflict markers:\n%s", got)
+	}
+
+	write(t, app, `{"a": "resolved", "m": "m", "b": "2"}`+"\n")
+	s.git(repo, "add", "secrets/app.json")
+	s.git(repo, "commit", "--no-edit")
+
+	blob := s.git(repo, "cat-file", "blob", "HEAD:secrets/app.json")
+	if strings.Contains(blob, "resolved") || !strings.Contains(blob, "sops") {
+		t.Errorf("resolved blob is not ciphertext:\n%s", blob)
+	}
+	if r := s.gitSops(repo, "verify"); r.code != 0 {
+		t.Errorf("verify failed after resolving:\n%s", r.out)
+	}
+}
