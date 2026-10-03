@@ -34,6 +34,15 @@ func assetName(version string) (string, error) {
 	}
 }
 
+func firstEnv(keys ...string) string {
+	for _, k := range keys {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 type release struct {
 	Assets []struct {
 		Name   string `json:"name"`
@@ -49,6 +58,10 @@ func fetchRelease(client *http.Client, version string) (*release, error) {
 	req, _ := http.NewRequest(http.MethodGet, apiURL, nil)
 	req.Header.Set("User-Agent", "git-sops")
 	req.Header.Set("Accept", "application/vnd.github+json")
+	// Unauthenticated API calls are rate-limited per IP, which shared CI runners exhaust.
+	if token := firstEnv("GITHUB_TOKEN", "GH_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -58,6 +71,9 @@ func fetchRelease(client *http.Client, version string) (*release, error) {
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("sops v%s was not found on GitHub", version)
+	}
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		return nil, fmt.Errorf("release lookup failed: %s (likely GitHub API rate limit; set GITHUB_TOKEN and retry)", resp.Status)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("release lookup failed: %s", resp.Status)

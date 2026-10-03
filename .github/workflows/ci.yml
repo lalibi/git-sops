@@ -37,5 +37,7 @@ jobs:
 
       - name: Install sops
         run: go run ./cmd/git-sops install-sops
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - run: go test ./...
