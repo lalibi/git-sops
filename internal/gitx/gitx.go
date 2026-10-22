@@ -80,6 +80,7 @@ func (g *Git) Output(args ...string) (string, error) {
 func (g *Git) Passthrough(args ...string) error {
 	cmd := exec.Command(g.Exe, args...)
 	cmd.Dir = g.Dir
+	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

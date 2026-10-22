@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -91,7 +92,24 @@ func newInitCommand(o *setup.Options) *cobra.Command {
 	cmd.Flags().StringVar(&o.AgeKeySource, "age-key", "", "import an age identity file before initializing")
 	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage the generated changes")
 	cmd.Flags().BoolVar(&o.Force, "force", false, "replace a hand-written .sops.yaml after backing it up")
+	addCommitFlags(cmd, o)
 	return cmd
+}
+
+func addCommitFlags(cmd *cobra.Command, o *setup.Options) {
+	cmd.Flags().BoolVar(&o.Commit, "commit", false, "commit validated staged changes using normal Git hooks and signing")
+	cmd.Flags().StringVar(&o.Message, "message", "", "override the generated commit message (requires --commit)")
+	cmd.PreRunE = func(cmd *cobra.Command, _ []string) error {
+		if cmd.Flags().Changed("message") {
+			if !o.Commit {
+				return errors.New("--message requires --commit")
+			}
+			if strings.TrimSpace(o.Message) == "" {
+				return errors.New("--message must not be empty")
+			}
+		}
+		return nil
+	}
 }
 
 func newPathCommand(base *setup.Options, remove bool) *cobra.Command {
@@ -112,6 +130,7 @@ func newPathCommand(base *setup.Options, remove bool) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringSliceVar(&paths, "protect", nil, "paths (comma-separated or repeatable); positional paths are also accepted")
+	addCommitFlags(cmd, base)
 	return cmd
 }
 
@@ -155,6 +174,7 @@ func newAddRecipientCommand(o *setup.Options) *cobra.Command {
 	}
 	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "age public recipient (repeatable)")
 	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage .sops.yaml")
+	addCommitFlags(cmd, o)
 	return cmd
 }
 
@@ -170,6 +190,7 @@ func newRemoveRecipientCommand(o *setup.Options) *cobra.Command {
 	}
 	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "age public recipient to remove (repeatable)")
 	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage .sops.yaml")
+	addCommitFlags(cmd, o)
 	return cmd
 }
 
@@ -187,6 +208,7 @@ func newMigrateCommand(o *setup.Options) *cobra.Command {
 	cmd.Flags().BoolVar(&o.Force, "force", false, "replace a hand-written .sops.yaml after backing it up")
 	cmd.Flags().BoolVar(&o.RemoveGitCryptMetadata, "remove-git-crypt-metadata", false, "git rm the tracked .git-crypt directory")
 	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "skip the confirmation prompt")
+	addCommitFlags(cmd, o)
 	return cmd
 }
 

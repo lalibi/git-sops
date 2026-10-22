@@ -54,6 +54,10 @@ func Protect(o Options) error {
 	if err != nil {
 		return err
 	}
+	requested, err := config.BuildSpecs(e.Root, o.Protect)
+	if err != nil {
+		return err
+	}
 	specs, err := config.BuildSpecs(e.Root, append(m.ProtectedPaths, o.Protect...))
 	if err != nil {
 		return err
@@ -74,7 +78,7 @@ func Protect(o Options) error {
 			touched = append(touched, p)
 		}
 	}
-	return pathTransaction(e, touched, func() error {
+	err = pathTransaction(e, touched, func() error {
 		if err := writeConfig(e, specs, m.Recipients, false, o); err != nil {
 			return err
 		}
@@ -87,9 +91,16 @@ func Protect(o Options) error {
 		if err := ValidateIndex(e); err != nil {
 			return err
 		}
-		ui.Okf("Protected path set updated. Review staged changes before committing.")
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if err := commitChanges(e, o, "protect", requested, nil); err != nil {
+		return err
+	}
+	ui.Okf("Protected path set updated. %s", reviewChanges(o))
+	return nil
 }
 
 // Unprotect only removes complete, explicitly configured rules. It never creates exclusions.
@@ -194,7 +205,7 @@ func Unprotect(o Options) error {
 		plain[p] = b
 	}
 	ui.Warnf("Removing protection stages current contents as PLAINTEXT. Review before committing. Earlier commits remain encrypted.")
-	return pathTransaction(e, filesToChange(plain), func() error {
+	err = pathTransaction(e, filesToChange(plain), func() error {
 		if err := writeConfig(e, remaining, m.Recipients, false, o); err != nil {
 			return err
 		}
@@ -225,6 +236,10 @@ func Unprotect(o Options) error {
 		}
 		return ValidateIndex(e)
 	})
+	if err != nil {
+		return err
+	}
+	return commitChanges(e, o, "unprotect", removed, nil)
 }
 
 func filesToChange(files map[string][]byte) []string {

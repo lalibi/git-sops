@@ -54,6 +54,41 @@ The executable is written to the ignored `bin/` directory. Rebuild after changin
 
 ## Quick start
 
+### Commit prepared changes automatically
+
+`init`, `protect`, `unprotect`, `add-recipient`, `remove-recipient`, and `migrate-git-crypt` stage their repository changes by default. Add `--commit` to create a commit after encryption and validation:
+
+```powershell
+git-sops init --protect "secrets/,Web.config" --commit
+git-sops protect src/Worker/service-secrets.txt --commit
+git-sops unprotect examples/ --commit
+git-sops add-recipient age1... --commit
+git-sops remove-recipient age1... --commit
+git-sops migrate-git-crypt --protect secrets/ --commit
+```
+
+With `--commit`, the index and tracked working tree must be clean before the operation starts. Finish any active merge, rebase, cherry-pick or revert first. Unrelated untracked files are left alone. `--commit` cannot be combined with `--no-stage`.
+
+The generated message uses the repository's conventional format and lists the affected files and folders, keeping trailing `/` characters for folders. For example:
+
+```text
+chore(git-sops): 🔐 Configure transparent file encryption
+
+Protect the following paths:
+- secrets/
+- Web.config
+```
+
+Recipient-change messages also list the public age recipients added or removed and the protected paths re-encrypted. Private keys and file contents are never included in the generated message. Override the complete message with `--message`:
+
+```powershell
+git-sops protect config/ --commit --message "chore(config): 🔐 Encrypt application configuration"
+```
+
+`--message` requires `--commit` and cannot be empty. Commits use normal Git hooks, identity settings and signing configuration. If committing fails, the command reports failure and leaves the prepared changes staged for inspection and a normal `git commit` retry. Empty commits are skipped; adding an already configured recipient does not re-encrypt files or create another commit. An `unprotect` invocation that only warns and skips paths also creates no commit.
+
+`join`, `decrypt`, `install-sops`, and `encrypt-history` do not accept these flags: they perform local setup, produce output, or rewrite existing commits.
+
 ### Initialize a repository
 
 Run from inside the repository you want to protect:

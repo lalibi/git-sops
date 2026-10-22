@@ -18,6 +18,8 @@ import (
 )
 
 type Options struct {
+	Commit                 bool
+	Message                string
 	RepoPath               string
 	Protect                []string
 	Recipients             []string
@@ -32,6 +34,9 @@ const defaultProtectedPath = "secrets/"
 
 // NewEnv resolves git, the repository root and sops. It never downloads anything.
 func NewEnv(o Options) (*Env, error) {
+	if err := validateCommitOptions(o); err != nil {
+		return nil, err
+	}
 	g, err := gitx.New("")
 	if err != nil {
 		return nil, err
@@ -63,13 +68,30 @@ func NewEnv(o Options) (*Env, error) {
 
 	keyFile, _ := agekey.KeyFile()
 
-	return &Env{
+	e := &Env{
 		Root:    root,
 		Git:     g,
 		Sops:    &sopsx.Client{Exe: sopsExe, Dir: root, KeyFile: keyFile},
 		NoStage: o.NoStage,
 		Force:   o.Force,
-	}, nil
+	}
+	if o.Commit {
+		if err := assertCleanTrackedTree(e); err != nil {
+			return nil, err
+		}
+		for _, state := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"} {
+			path, err := g.Output("rev-parse", "--path-format=absolute", "--git-path", state)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := os.Stat(path); err == nil {
+				return nil, errors.New("finish the current merge, rebase or sequencer operation before using --commit")
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+		}
+	}
+	return e, nil
 }
 
 func validateRecipients(in []string) error {
@@ -248,6 +270,9 @@ func Init(o Options) error {
 	if err := ValidateIndex(e); err != nil {
 		return err
 	}
+	if err := commitChanges(e, o, "init", specs, nil); err != nil {
+		return err
+	}
 
 	paths := make([]string, len(specs))
 	for i, s := range specs {
@@ -261,7 +286,7 @@ func Init(o Options) error {
 		"Protected  "+strings.Join(paths, ", "),
 		"Recipient  "+id.Recipient,
 		"",
-		"Review with "+ui.Code("git status")+" and "+ui.Code("git diff --cached")+", then commit.")
+		reviewChanges(o))
 	return nil
 }
 
@@ -348,7 +373,7 @@ func AddRecipient(o Options) error {
 	}
 
 	ui.Box("Recipients updated",
-		"Review the staged ciphertext with "+ui.Code("git diff --cached")+", then commit and push.",
+		reviewChanges(o),
 		"The new recipient can pull and run "+ui.Code("git-sops join")+".")
 	return nil
 }
@@ -409,7 +434,7 @@ func RemoveRecipient(o Options) error {
 	}
 
 	ui.Box("Recipients updated",
-		"Review the staged ciphertext with "+ui.Code("git diff --cached")+", then commit and push.",
+		reviewChanges(o),
 		"Old commits still hold ciphertext the removed recipient can decrypt.",
 		"Rotate the real credentials they may have seen.")
 	return nil
@@ -444,6 +469,16 @@ func changeRecipients(o Options, command string, next func(current []string) ([]
 	all, err := next(managed.Recipients)
 	if err != nil {
 		return nil, err
+	}
+	all = config.UniqueRecipients(all)
+	current := config.UniqueRecipients(managed.Recipients)
+	if slices.Equal(current, all) {
+		ui.Okf("Recipients are unchanged; nothing to commit.")
+		return all, nil
+	}
+	changed := recipientDifference(all, current)
+	if command == "remove-recipient" {
+		changed = recipientDifference(current, all)
 	}
 
 	err = ui.Task("Updating .sops.yaml", func() error {
@@ -480,6 +515,9 @@ func changeRecipients(o Options, command string, next func(current []string) ([]
 	}
 
 	if err := ValidateIndex(e); err != nil {
+		return nil, err
+	}
+	if err := commitChanges(e, o, command, specs, changed); err != nil {
 		return nil, err
 	}
 
@@ -563,7 +601,7 @@ func MigrateGitCrypt(o Options) error {
 	if !o.Yes && ui.Interactive() {
 		yes, err := ui.Confirm(
 			"Migrate this repository from git-crypt to SOPS?",
-			"This rewrites .gitattributes and stages the current plaintext files through SOPS. Nothing is committed.",
+			"This rewrites .gitattributes and stages the current plaintext files through SOPS. A commit is created only with --commit.",
 			true)
 		if err != nil {
 			return err
@@ -622,9 +660,12 @@ func MigrateGitCrypt(o Options) error {
 	if err := ValidateIndex(e); err != nil {
 		return err
 	}
+	if err := commitChanges(e, o, "migrate-git-crypt", specs, nil); err != nil {
+		return err
+	}
 
-	ui.Box("git-crypt -> SOPS migration staged",
+	ui.Box("git-crypt -> SOPS migration prepared",
 		"Do NOT delete your old git-crypt keys yet: historical commits remain git-crypt encrypted.",
-		"Review the staged blobs, then commit.")
+		reviewChanges(o))
 	return nil
 }
