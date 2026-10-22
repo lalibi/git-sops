@@ -171,3 +171,101 @@ func TestEncryptHistoryRollsBackAfterFinalValidationFailure(t *testing.T) {
 		t.Fatalf("rollback left dirty files: %s", status)
 	}
 }
+
+func TestEncryptHistoryRewritesStandaloneCheckpointTrees(t *testing.T) {
+	s := newSandbox(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	s.git(filepath.Dir(repo), "init", "-b", "main", repo)
+	write(t, filepath.Join(repo, "Web.config"), "historical secret\n")
+	write(t, filepath.Join(repo, "README.md"), "public\n")
+	s.git(repo, "add", ".")
+	s.git(repo, "commit", "-m", "plaintext root")
+	originalTree := strings.TrimSpace(s.git(repo, "rev-parse", "HEAD^{tree}"))
+	s.git(repo, "tag", "-a", "tree-checkpoint", originalTree, "-m", "checkpoint tag metadata")
+	// This version exists only in a standalone checkpoint, never in any commit.
+	write(t, filepath.Join(repo, "Web.config"), "checkpoint-only secret\n")
+	s.git(repo, "add", "Web.config")
+	checkpointTree := strings.TrimSpace(s.git(repo, "write-tree"))
+	checkpointRef := "refs/codex/turn-diffs/checkpoints/session/turn/123/checkpoint"
+	s.git(repo, "update-ref", checkpointRef, checkpointTree)
+	s.git(repo, "reset", "--hard", "HEAD")
+	s.mustGitSops(repo, "init", "--protect", "Web.config", "--commit")
+	s.mustGitSops(repo, "encrypt-history", "--confirm-rewrite")
+	newCheckpoint := strings.TrimSpace(s.git(repo, "rev-parse", checkpointRef))
+	newTaggedTree := strings.TrimSpace(s.git(repo, "rev-parse", "tree-checkpoint^{}"))
+	if newCheckpoint == checkpointTree || newTaggedTree == originalTree {
+		t.Fatal("standalone tree refs were not rewritten")
+	}
+	for tree, want := range map[string]string{newCheckpoint: "checkpoint-only secret\n", newTaggedTree: "historical secret\n"} {
+		if kind := strings.TrimSpace(s.git(repo, "cat-file", "-t", tree)); kind != "tree" {
+			t.Fatalf("checkpoint type changed to %s", kind)
+		}
+		ciphertext := s.git(repo, "cat-file", "blob", tree+":Web.config")
+		if !strings.Contains(ciphertext, "sops") || strings.Contains(ciphertext, "secret") {
+			t.Fatal("checkpoint retains plaintext")
+		}
+		cipherFile := filepath.Join(t.TempDir(), "Web.config")
+		write(t, cipherFile, ciphertext)
+		if got := s.mustGitSops(repo, "decrypt", cipherFile); got != want {
+			t.Fatalf("checkpoint decryption = %q, want %q", got, want)
+		}
+		s.git(repo, "cat-file", "blob", tree+":.sops.yaml")
+		if attrs := s.git(repo, "cat-file", "blob", tree+":.gitattributes"); !strings.Contains(attrs, "/Web.config filter=sops") {
+			t.Fatal("checkpoint lacks protection attributes")
+		}
+		if got := s.git(repo, "rev-parse", tree+":README.md"); got != s.git(repo, "rev-parse", originalTree+":README.md") {
+			t.Fatal("unprotected checkpoint file changed")
+		}
+	}
+	if tag := s.git(repo, "cat-file", "tag", "tree-checkpoint"); !strings.Contains(tag, "type tree\n") || !strings.Contains(tag, "checkpoint tag metadata") {
+		t.Fatal("annotated tree tag metadata changed")
+	}
+	backups, _ := filepath.Glob(filepath.Join(repo, ".git", "git-sops-before-history-*.bundle"))
+	if len(backups) != 1 {
+		t.Fatalf("expected one recovery bundle: %v", backups)
+	}
+	s.git(repo, "bundle", "verify", backups[0])
+	if heads := s.git(repo, "bundle", "list-heads", backups[0], checkpointRef); !strings.Contains(heads, checkpointTree+" "+checkpointRef) {
+		t.Fatal("recovery bundle omits original checkpoint ref")
+	}
+	if got := read(t, filepath.Join(repo, "Web.config")); got != "historical secret\n" {
+		t.Fatal("working plaintext changed")
+	}
+	if status := strings.TrimSpace(s.git(repo, "status", "--porcelain")); status != "" {
+		t.Fatalf("tree-ref rewrite left dirty files: %s", status)
+	}
+}
+
+func TestEncryptHistoryRejectsPathlessBlobRefsBeforePreparingCommits(t *testing.T) {
+	s := newSandbox(t)
+	repo := protectedRepo(t, s)
+	s.git(repo, "commit", "-m", "protect secrets")
+	blob := strings.TrimSpace(s.git(repo, "rev-parse", "HEAD:README.md"))
+	index := s.git(repo, "write-tree")
+	policy := read(t, filepath.Join(repo, ".sops.yaml"))
+	for _, tagged := range []bool{false, true} {
+		ref := "refs/checkpoints/blob"
+		if tagged {
+			s.git(repo, "tag", "-a", "blob-checkpoint", blob, "-m", "blob tag")
+			ref = "refs/tags/blob-checkpoint"
+		} else {
+			s.git(repo, "update-ref", ref, blob)
+		}
+		before := s.git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+		// Unsupported targets should be caught even before approval is requested.
+		r := s.gitSops(repo, "encrypt-history")
+		if r.code == 0 || !strings.Contains(r.out, "unsupported blob") || !strings.Contains(r.out, ref) || strings.Contains(r.out, "Prepared") {
+			t.Fatalf("expected early blob-ref rejection: %+v", r)
+		}
+		if got := s.git(repo, "for-each-ref", "--format=%(refname) %(objectname)"); got != before {
+			t.Fatal("rejected blob ref changed source refs")
+		}
+		if s.git(repo, "write-tree") != index || read(t, filepath.Join(repo, ".sops.yaml")) != policy {
+			t.Fatal("rejected blob ref changed index or policy")
+		}
+		if temporary, _ := filepath.Glob(filepath.Join(repo, ".git", "git-sops-rewrite-*")); len(temporary) != 0 {
+			t.Fatal("blob refs were rejected after preparing a mirror")
+		}
+		s.git(repo, "update-ref", "-d", ref)
+	}
+}

@@ -71,6 +71,9 @@ func EncryptHistory(o Options, approved bool) error {
 			return errors.New("remove replace refs before rewriting history")
 		}
 	}
+	if err := validateHistoryRefTargets(e.Git, refs); err != nil {
+		return err
+	}
 	common, err := e.Git.Output("rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return err
@@ -93,7 +96,7 @@ func EncryptHistory(o Options, approved bool) error {
 		}
 	}
 	ui.Header("encrypt-history", e.Root)
-	ui.Warnf("This rewrites ALL local refs, including branches, remote-tracking refs and tags, in place.")
+	ui.Warnf("This rewrites ALL local refs, including branches, remote-tracking refs, tags and checkpoint trees, in place.")
 	ui.Warnf("Commit IDs change. Commit and tag signatures are removed. Coordinate force pushes and fresh clones with collaborators.")
 	ui.Warnf("Selected paths: %s. Renamed historical paths must be listed explicitly; submodule histories are not traversed.", strings.Join(paths, ", "))
 	ui.Warnf("A recovery bundle is retained in the Git directory. It and old unreachable objects contain the ORIGINAL plaintext history.")
@@ -325,9 +328,14 @@ func (r *historyRewriter) commit(oid string) error {
 	if err != nil {
 		return err
 	}
+	return r.validateTree(r.objects[oid])
+}
+
+// Both commit snapshots and standalone tree refs must satisfy the same policy.
+func (r *historyRewriter) validateTree(oid string) error {
 	// Use a disposable index in the mirror to validate effective attributes,
 	// including historical unmanaged and nested rules.
-	if _, err := r.git.Run(nil, "read-tree", r.objects[oid]); err != nil {
+	if _, err := r.git.Run(nil, "read-tree", oid); err != nil {
 		return err
 	}
 	_, failures, err := filter.VerifyIndex(r.git, r.sops)
@@ -335,7 +343,7 @@ func (r *historyRewriter) commit(oid string) error {
 		return err
 	}
 	if len(failures) > 0 {
-		return fmt.Errorf("commit %s still has plaintext protected files: %s; include their paths with --protect", oid, strings.Join(failures, ", "))
+		return fmt.Errorf("snapshot %s still has plaintext protected files: %s; include their paths with --protect", oid, strings.Join(failures, ", "))
 	}
 	return validateSelectedAttributes(r.git, r.specs)
 }
@@ -348,8 +356,19 @@ func (r *historyRewriter) object(oid string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if kind == "tree" {
+		mapped, err := r.tree(oid, "")
+		if err != nil {
+			return "", err
+		}
+		if err := r.validateTree(mapped); err != nil {
+			return "", err
+		}
+		r.objects[oid] = mapped
+		return mapped, nil
+	}
 	if kind != "tag" {
-		return "", fmt.Errorf("ref targets unsupported %s object %s; only commits and annotated tags to commits are supported", kind, oid)
+		return "", fmt.Errorf("ref targets unsupported %s object %s; only commits, root trees and annotated tags to them are supported", kind, oid)
 	}
 	b, err := r.git.Run(nil, "cat-file", "tag", oid)
 	if err != nil {
@@ -528,6 +547,21 @@ func historyRefs(g *gitx.Git) (map[string]string, error) {
 		} // Symbolic refs follow their rewritten target.
 	}
 	return refs, nil
+}
+
+// Reject pathless blobs before preparing commits or asking for rewrite approval.
+// A tree is interpreted as a repository-root snapshot, including Codex checkpoints.
+func validateHistoryRefTargets(g *gitx.Git, refs map[string]string) error {
+	for name, oid := range refs {
+		kind, err := g.Output("cat-file", "-t", oid+"^{}")
+		if err != nil {
+			return fmt.Errorf("inspect %s: %w", name, err)
+		}
+		if kind != "commit" && kind != "tree" {
+			return fmt.Errorf("ref %s targets unsupported %s object %s; a standalone blob has no filename for selecting protection rules; no refs were rewritten", name, kind, oid)
+		}
+	}
+	return nil
 }
 
 func sameRefs(a, b map[string]string) bool {

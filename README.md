@@ -1078,7 +1078,7 @@ The command displays warnings and asks you to type **`rewrite history`** before 
 
 The rewrite:
 
-- encrypts each selected historical version across all local refs, including branches, tags and remote-tracking refs; additional paths extend the current managed set;
+- encrypts each selected historical version across all local refs, including branches, tags, remote-tracking refs and standalone root-tree checkpoints such as `refs/codex/turn-diffs/checkpoints/...`; additional paths extend the current managed set;
 - preserves commit ancestry, merges, authors, committers, dates and messages, and preserves annotated tag metadata, while removing signatures tied to the old objects;
 - adds the current managed SOPS policy and protection attributes to historical commits, preserving unmanaged attributes and updating existing nested attribute files;
 - re-encrypts selected existing SOPS ciphertext for the current recipients, requiring a key that can decrypt historical versions;
@@ -1086,7 +1086,7 @@ The rewrite:
 - prepares objects in a temporary mirror and changes source refs in one transaction, then updates the current index and configuration while keeping local application files plaintext;
 - retains a recovery bundle under the Git directory and prints its path; it does not push or prune old objects.
 
-Historical rename detection is not automatic: list all former paths that need protection, and use a trailing `/` for deleted directories. SOPS may normalize formatting in structured formats, as in normal filter operation. Symlinks or submodule entries selected for encryption are rejected, and submodule repositories must be handled separately. Configuration files must stay plaintext; a protected directory containing its own `.gitattributes` is rejected. Repositories must be complete (not shallow), have no linked worktrees, replace refs or legacy grafts, and have committed `.gitattributes` and `.sops.yaml`. Refs targeting standalone trees or blobs are rejected rather than silently left outside the rewrite.
+Historical rename detection is not automatic: list all former paths that need protection, and use a trailing `/` for deleted directories. SOPS may normalize formatting in structured formats, as in normal filter operation. Symlinks or submodule entries selected for encryption are rejected, and submodule repositories must be handled separately. Configuration files must stay plaintext; a protected directory containing its own `.gitattributes` is rejected. Repositories must be complete (not shallow), have no linked worktrees, replace refs or legacy grafts, and have committed `.gitattributes` and `.sops.yaml`. Standalone trees, including annotated tags pointing to trees, are interpreted as repository-root snapshots and encrypted and validated with the same policy as commits. Refs resolving to standalone blobs are rejected before preparing commits: a blob alone has no filename for matching protection rules. Checkpoint refs are rewritten rather than skipped, and their original targets are retained in the recovery bundle.
 
 **Publishing is a separate, coordinated operation.** Review branches and tags, test a fresh clone with `git-sops join`, and arrange force pushes and fresh clones with collaborators. Remotes, forks and hosting caches are unchanged. The recovery bundle, reflogs and unreachable local objects retain the original history, possibly including plaintext. Keep the bundle securely and decide separately how to remove obsolete copies after validation. Rotate any credentials previously exposed in plaintext.
 
