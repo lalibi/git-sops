@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -31,7 +30,8 @@ type ExitCodeError struct {
 
 func (e *ExitCodeError) Error() string { return e.Message }
 
-// selfCommand is how Git config refers to this binary: by name when it is on PATH, else by absolute path.
+// selfCommand pins the current executable. GUI Git clients may inherit a PATH
+// that differs from the terminal that configured the repository.
 func selfCommand() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -39,14 +39,6 @@ func selfCommand() (string, error) {
 	}
 	if resolved, err := filepath.EvalSymlinks(self); err == nil {
 		self = resolved
-	}
-
-	if p, err := exec.LookPath("git-sops"); err == nil {
-		a, errA := os.Stat(p)
-		b, errB := os.Stat(self)
-		if errA == nil && errB == nil && os.SameFile(a, b) {
-			return "git-sops", nil
-		}
 	}
 
 	if strings.Contains(self, "'") {

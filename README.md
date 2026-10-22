@@ -1324,11 +1324,16 @@ Git runs `git-sops` through the filter config. Verify that it resolves and that 
 git-sops check
 ```
 
-If `git-sops` is not on `PATH`, the local config uses its absolute path, so moving or reinstalling the binary breaks it. Rerun:
+`init` and `join` store the quoted absolute path of the running `git-sops` executable in the filter, diff, merge and hook commands. This also works when a GUI Git client's `PATH` differs from your terminal's. Keep the executable in a stable location; if you move it, rerun `join` using its new path.
 
-```text
-git-sops join
+Older setups may refer to the bare `git-sops` command. A GUI client's reset, checkout or commit can then fail with `git-sops: command not found` even if the command works in your terminal. Rebuild or install the updated executable, then run it by its full path against the affected repository:
+
+```powershell
+& 'C:\path\to\git-sops.exe' -C 'C:\path\to\affected-repo' join
+git -C 'C:\path\to\affected-repo' config --local --get filter.sops.clean
 ```
+
+The configured command should start with the quoted absolute executable path, rather than bare `git-sops`. `join` repairs these local commands without rewriting history.
 
 ---
 
