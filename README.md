@@ -40,7 +40,7 @@ Run from inside the repository you want to protect:
 git-sops init --protect secrets/ --protect appsettings.json --protect src/Web/appsettings.Production.json
 ```
 
-`--protect` accepts exact file or directory paths relative to the repository root and can be repeated. In an interactive terminal, `git-sops init` without `--protect` asks which paths to protect; output uses colors, spinners and progress bars, and falls back to plain text when piped or when `NO_COLOR` is set.
+`--protect` accepts exact file or directory paths relative to the repository root. Use comma-separated values (`--protect "secrets/,appsettings.json"`), repeated flags, or both. In an interactive terminal, `git-sops init` without `--protect` asks which paths to protect; output uses colors, spinners and progress bars, and falls back to plain text when piped or when `NO_COLOR` is set.
 
 For example:
 
@@ -974,45 +974,38 @@ Verify as in the Quick start: `git status --short` should be empty and `git hook
 
 # 19. Adding a new protected file later
 
-Suppose the repository already uses the system and you decide to protect:
-
-```text
-src/Worker/service-secrets.txt
-```
-
-The safest approach is to rerun initialization with the complete intended path set:
-
-```text
-git-sops init \
-    --protect secrets/ \
-    --protect appsettings.json \
-    --protect src/Worker/service-secrets.txt
-```
-
-The generated managed path configuration is replaced with the new complete set.
-
-Existing recipients from a managed `.sops.yaml` are preserved when `init` is rerun, so adding a protected path does not silently remove collaborators previously added with `add-recipient`.
-
-Then verify:
+Use `protect` to add files or directories to an initialized repository without replacing existing rules or recipients:
 
 ```powershell
-git check-attr -a -- src/Worker/service-secrets.txt
+git-sops protect src/Worker/service-secrets.txt
+git-sops protect --protect "secrets/,appsettings.json"
+git-sops protect --protect config/ --protect credentials.txt
+git-sops verify
+git diff --cached
+git commit -m "Protect additional files"
 ```
 
-Expected:
+Paths are relative to the repository root. Positional arguments are literal paths; CSV parsing applies to `--protect`. Quote paths containing spaces. For a literal comma in a filename, use a positional argument. End directory paths with `/` when the directory does not currently exist. Already tracked plaintext is re-encrypted and staged, while working copies remain plaintext. These commands require a clean tracked working tree; untracked files may be added by `protect`.
 
-```text
-filter: sops
-text: unset
-```
+`init --protect` remains available for replacing the **complete** managed path set. It preserves existing recipients, but use `unprotect` when removing protection so the old encrypted index entry is converted to plaintext explicitly.
 
-Stage and inspect the index:
+## 19.1 Removing protection
+
+Remove secrets from a file before publishing its plaintext, then commit that edit. To remove a complete configured rule:
 
 ```powershell
-git add -- src/Worker/service-secrets.txt
-git show :src/Worker/service-secrets.txt
-git hook run pre-commit
+git-sops unprotect appsettings.json
+git-sops unprotect --protect "secrets/,credentials.txt"
+git-sops verify
+git diff --cached
+git commit -m "Publish files that no longer need encryption"
 ```
+
+`unprotect` updates both configuration files and stages current contents as **plaintext**. It preserves recipients and all remaining rules. Earlier encrypted versions remain encrypted in history. Removing the last rule leaves an initialized repository with no protected paths; a later plain `init` preserves that empty set.
+
+Only complete rules can be removed. If `secrets/` is protected, `unprotect secrets/token.txt` warns and skips the file, leaving it protected: individual exclusions are not supported. An explicitly configured child rule still covered by a remaining folder rule is also skipped with a warning. If every requested path is skipped, the command succeeds without changing configuration, the index or working files, even when changes are already staged. Other valid complete rules in the same invocation are processed normally. Independently configured child rules remain protected when their parent rule is removed. Files still covered by unmanaged attributes cause the operation to fail and restore the previous policy, index and touched files.
+
+This is useful for public defaults, example files, or configuration that now references an external secret store. It is not a way to revoke access to previously disclosed secrets.
 
 ---
 
@@ -1474,6 +1467,8 @@ The behavior lives in the `git-sops` executable:
 | Subcommand | Role |
 | --- | --- |
 | `init` | Configure a repository (also upgrades legacy PowerShell setups) |
+| `protect` | Add protected paths and encrypt/stage their current contents |
+| `unprotect` | Remove complete protection rules and stage plaintext |
 | `join` | Fresh clone / new machine: configure filters and decrypt the working tree |
 | `add-recipient` | Authorize a new age recipient and re-encrypt protected files |
 | `remove-recipient` | Revoke an age recipient and re-encrypt protected files without it |

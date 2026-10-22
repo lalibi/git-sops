@@ -202,7 +202,7 @@ func Init(o Options) error {
 	protect := o.Protect
 	if len(protect) == 0 {
 		switch {
-		case existing != nil && len(existing.ProtectedPaths) > 0:
+		case existing != nil:
 			protect = existing.ProtectedPaths
 		case ui.Interactive():
 			if protect, err = promptProtectedPaths(); err != nil {

@@ -263,6 +263,35 @@ func Stage(e *Env, specs []config.Spec) error {
 
 	bar.Set(int64(len(specs)), "")
 	bar.Finish("Staged %d protected path(s)", staged)
+	return validateSelectedAttributes(e.Git, specs)
+}
+
+// Selected paths must actually use the filter, even when unmanaged or nested
+// attributes override a managed rule. A generic index check cannot detect this.
+func validateSelectedAttributes(g *gitx.Git, specs []config.Spec) error {
+	files, err := g.ZList("ls-files", "-z")
+	if err != nil {
+		return err
+	}
+	var selected []string
+	for _, p := range files {
+		if config.Protected(specs, p) {
+			selected = append(selected, p)
+		}
+	}
+	if len(selected) == 0 {
+		return nil
+	}
+	attrs, err := g.Run([]byte(strings.Join(selected, "\x00")+"\x00"), "check-attr", "--cached", "-z", "--stdin", "filter")
+	if err != nil {
+		return err
+	}
+	fields := strings.Split(string(attrs), "\x00")
+	for i := 0; i+2 < len(fields); i += 3 {
+		if fields[i+2] != "sops" {
+			return fmt.Errorf("attributes do not protect %q; another attribute rule overrides the managed policy", fields[i])
+		}
+	}
 	return nil
 }
 

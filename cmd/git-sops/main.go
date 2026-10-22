@@ -58,6 +58,8 @@ func newRootCommand() *cobra.Command {
 
 	root.AddCommand(
 		newInitCommand(&opts),
+		newPathCommand(&opts, false),
+		newPathCommand(&opts, true),
 		newJoinCommand(&opts),
 		newAddRecipientCommand(&opts),
 		newRemoveRecipientCommand(&opts),
@@ -83,11 +85,32 @@ func newInitCommand(o *setup.Options) *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error { return setup.Init(*o) },
 	}
-	cmd.Flags().StringSliceVar(&o.Protect, "protect", nil, "file or directory to protect (repeatable); defaults to the existing set, else asks")
+	cmd.Flags().StringSliceVar(&o.Protect, "protect", nil, "complete protected path set (comma-separated or repeatable); defaults to the existing set, else asks")
 	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "additional age public recipient (repeatable)")
 	cmd.Flags().StringVar(&o.AgeKeySource, "age-key", "", "import an age identity file before initializing")
 	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage the generated changes")
 	cmd.Flags().BoolVar(&o.Force, "force", false, "replace a hand-written .sops.yaml after backing it up")
+	return cmd
+}
+
+func newPathCommand(base *setup.Options, remove bool) *cobra.Command {
+	var paths []string
+	name, short := "protect", "Add files or directories to the existing protected path set"
+	if remove {
+		name, short = "unprotect", "Remove complete protection rules and stage current contents as plaintext"
+	}
+	cmd := &cobra.Command{
+		Use: name + " [paths...]", Short: short,
+		RunE: func(_ *cobra.Command, args []string) error {
+			o := *base
+			o.Protect = append(append([]string{}, paths...), args...)
+			if remove {
+				return setup.Unprotect(o)
+			}
+			return setup.Protect(o)
+		},
+	}
+	cmd.Flags().StringSliceVar(&paths, "protect", nil, "paths (comma-separated or repeatable); positional paths are also accepted")
 	return cmd
 }
 
@@ -139,7 +162,7 @@ func newMigrateCommand(o *setup.Options) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  func(*cobra.Command, []string) error { return setup.MigrateGitCrypt(*o) },
 	}
-	cmd.Flags().StringSliceVar(&o.Protect, "protect", nil, "file or directory to protect (repeatable); defaults to secrets/")
+	cmd.Flags().StringSliceVar(&o.Protect, "protect", nil, "file or directory to protect (comma-separated or repeatable); defaults to secrets/")
 	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "additional age public recipient (repeatable)")
 	cmd.Flags().StringVar(&o.AgeKeySource, "age-key", "", "import an age identity file first")
 	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage the generated changes")

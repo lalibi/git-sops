@@ -21,10 +21,35 @@ func TestNormalizePath(t *testing.T) {
 		}
 	}
 
-	for _, in := range []string{"", "/", "../x", "a/../b", "*.json", "a?b", "a[1]"} {
+	for _, in := range []string{"", "/", ".", "./", "../x", "a/../b", "*.json", "a?b", "a[1]", "a\nb", "C:/secrets"} {
 		if _, err := NormalizePath(in); err == nil {
 			t.Errorf("NormalizePath(%q) should fail", in)
 		}
+	}
+}
+
+func TestQuotedPathsRoundTripManagedPolicy(t *testing.T) {
+	root := t.TempDir()
+	specs, err := BuildSpecs(root, []string{"private folder/", "it's-secret.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if specs[0].AttributePattern != `"/private folder/**"` {
+		t.Fatalf("attributes pattern = %q", specs[0].AttributePattern)
+	}
+	if err := WriteSopsConfig(root, specs, []string{"age1aaa"}, false, func(string, ...any) {}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, ".sops.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "it''s-secret") {
+		t.Fatalf("single-quoted YAML path was not escaped: %s", b)
+	}
+	m, err := ReadManaged(filepath.Join(root, ".sops.yaml"))
+	if err != nil || m == nil || strings.Join(m.ProtectedPaths, ",") != "private folder/,it's-secret.txt" {
+		t.Fatalf("policy round trip: %+v, %v", m, err)
 	}
 }
 

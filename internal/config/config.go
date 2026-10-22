@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,6 +39,9 @@ type Spec struct {
 func IsRecipient(s string) bool { return recipientPattern.MatchString(s) }
 
 func NormalizePath(p string) (string, error) {
+	if strings.ContainsAny(p, "\r\n\x00") || strings.Contains(p, ":") || strings.HasPrefix(p, `\\`) {
+		return "", fmt.Errorf("invalid repository-relative path %q", p)
+	}
 	n := strings.ReplaceAll(strings.TrimSpace(p), `\`, "/")
 	n = strings.Trim(n, "/")
 
@@ -45,6 +50,10 @@ func NormalizePath(p string) (string, error) {
 	}
 	if dotDot.MatchString(n) || globChars.MatchString(n) {
 		return "", fmt.Errorf("protected paths accept exact files or directories only, not '..' or glob patterns: %q", p)
+	}
+	n = path.Clean(n)
+	if n == "." {
+		return "", errors.New("the repository root cannot be protected; select its files or subdirectories")
 	}
 	return n, nil
 }
@@ -70,6 +79,14 @@ func BuildSpecs(root string, paths []string) ([]Spec, error) {
 		if err != nil {
 			return nil, err
 		}
+		for _, part := range strings.Split(rel, "/") {
+			if strings.EqualFold(part, ".git") {
+				return nil, fmt.Errorf("Git metadata cannot be protected: %q", raw)
+			}
+		}
+		if filepath.Base(rel) == ".gitattributes" || rel == ".sops.yaml" {
+			return nil, fmt.Errorf("encryption configuration must remain plaintext: %q", raw)
+		}
 
 		isDir := strings.HasSuffix(raw, "/") || strings.HasSuffix(raw, `\`)
 		if st, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err == nil && st.IsDir() {
@@ -79,6 +96,10 @@ func BuildSpecs(root string, paths []string) ([]Spec, error) {
 		pattern := "/" + rel
 		if isDir {
 			pattern = "/" + rel + "/**"
+		}
+		// Git attributes require C-style quoting for spaces and special characters.
+		if strings.ContainsAny(pattern, " \t\"\\") {
+			pattern = strconv.Quote(pattern)
 		}
 
 		specs = append(specs, Spec{
@@ -90,6 +111,19 @@ func BuildSpecs(root string, paths []string) ([]Spec, error) {
 	}
 
 	return specs, nil
+}
+
+func Matches(s Spec, path string) bool {
+	return path == s.RelativePath && !s.IsDirectory || s.IsDirectory && strings.HasPrefix(path, s.RelativePath+"/")
+}
+
+func Protected(specs []Spec, path string) bool {
+	for _, s := range specs {
+		if Matches(s, path) {
+			return true
+		}
+	}
+	return false
 }
 
 func readLines(path string) ([]string, error) {
@@ -122,10 +156,23 @@ var (
 // UpdateAttributes rewrites the managed block in .gitattributes, leaving other lines untouched.
 func UpdateAttributes(root string, specs []Spec, migrateGitCrypt bool) error {
 	path := filepath.Join(root, ".gitattributes")
-
-	lines, err := readLines(path)
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	out, err := RenderAttributes(data, specs, migrateGitCrypt)
 	if err != nil {
 		return err
+	}
+	return os.WriteFile(path, out, 0o644)
+}
+
+// RenderAttributes preserves unmanaged attributes while replacing the managed block.
+func RenderAttributes(data []byte, specs []Spec, migrateGitCrypt bool) ([]byte, error) {
+	var lines []string
+	text := strings.TrimSuffix(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	if text != "" {
+		lines = strings.Split(text, "\n")
 	}
 
 	if migrateGitCrypt {
@@ -153,7 +200,7 @@ func UpdateAttributes(root string, specs []Spec, migrateGitCrypt bool) error {
 	}
 
 	if (begin >= 0) != (end >= 0) || (begin >= 0 && end < begin) {
-		return errors.New("the managed .gitattributes block is malformed")
+		return nil, errors.New("the managed .gitattributes block is malformed")
 	}
 
 	block := []string{AttributesBegin}
@@ -175,7 +222,7 @@ func UpdateAttributes(root string, specs []Spec, migrateGitCrypt bool) error {
 		out = append(out, block...)
 	}
 
-	return writeLines(path, out)
+	return []byte(strings.Join(out, "\n") + "\n"), nil
 }
 
 type Managed struct {
@@ -246,7 +293,7 @@ func WriteSopsConfig(root string, specs []Spec, recipients []string, force bool,
 	}
 	lines = append(lines,
 		"creation_rules:",
-		"  - path_regex: '^(?:"+strings.Join(parts, "|")+")$'",
+		"  - path_regex: '^(?:"+strings.ReplaceAll(strings.Join(parts, "|"), "'", "''")+")$'",
 		"    age:")
 	for _, r := range UniqueRecipients(recipients) {
 		lines = append(lines, "      - "+r)
