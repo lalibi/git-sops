@@ -1007,6 +1007,34 @@ Only complete rules can be removed. If `secrets/` is protected, `unprotect secre
 
 This is useful for public defaults, example files, or configuration that now references an external secret store. It is not a way to revoke access to previously disclosed secrets.
 
+## 19.2 Encrypting existing history in place
+
+`protect` and `init` do not modify earlier commits. Use the separate history command on a clean, initialized repository:
+
+```powershell
+git-sops encrypt-history
+# Include former paths and deleted paths explicitly:
+git-sops encrypt-history --protect "old-secrets/,previous-name.json"
+```
+
+The command displays warnings and asks you to type **`rewrite history`** before preparing the rewrite. Noninteractive invocations fail unless explicit approval is supplied with `--confirm-rewrite`. That flag acknowledges the same warnings; do not add it casually to automation.
+
+The rewrite:
+
+- encrypts each selected historical version across all local refs, including branches, tags and remote-tracking refs; additional paths extend the current managed set;
+- preserves commit ancestry, merges, authors, committers, dates and messages, and preserves annotated tag metadata, while removing signatures tied to the old objects;
+- adds the current managed SOPS policy and protection attributes to historical commits, preserving unmanaged attributes and updating existing nested attribute files;
+- re-encrypts selected existing SOPS ciphertext for the current recipients, requiring a key that can decrypt historical versions;
+- checks decryption of generated ciphertext, checks binary round trips, validates effective protection attributes and protected blobs in every rewritten commit, and checks Git object integrity before updating source refs;
+- prepares objects in a temporary mirror and changes source refs in one transaction, then updates the current index and configuration while keeping local application files plaintext;
+- retains a recovery bundle under the Git directory and prints its path; it does not push or prune old objects.
+
+Historical rename detection is not automatic: list all former paths that need protection, and use a trailing `/` for deleted directories. SOPS may normalize formatting in structured formats, as in normal filter operation. Symlinks or submodule entries selected for encryption are rejected, and submodule repositories must be handled separately. Configuration files must stay plaintext; a protected directory containing its own `.gitattributes` is rejected. Repositories must be complete (not shallow), have no linked worktrees, replace refs or legacy grafts, and have committed `.gitattributes` and `.sops.yaml`. Refs targeting standalone trees or blobs are rejected rather than silently left outside the rewrite.
+
+**Publishing is a separate, coordinated operation.** Review branches and tags, test a fresh clone with `git-sops join`, and arrange force pushes and fresh clones with collaborators. Remotes, forks and hosting caches are unchanged. The recovery bundle, reflogs and unreachable local objects retain the original history, possibly including plaintext. Keep the bundle securely and decide separately how to remove obsolete copies after validation. Rotate any credentials previously exposed in plaintext.
+
+For recovery, inspect `git bundle list-heads <printed-bundle-path>` or clone the bundle into a separate directory. Keep the original bundle until the rewritten history has been independently verified.
+
 ---
 
 # 20. Git worktrees
@@ -1469,6 +1497,7 @@ The behavior lives in the `git-sops` executable:
 | `init` | Configure a repository (also upgrades legacy PowerShell setups) |
 | `protect` | Add protected paths and encrypt/stage their current contents |
 | `unprotect` | Remove complete protection rules and stage plaintext |
+| `encrypt-history` | Rewrite all local refs in place after explicit approval; retain a recovery bundle |
 | `join` | Fresh clone / new machine: configure filters and decrypt the working tree |
 | `add-recipient` | Authorize a new age recipient and re-encrypt protected files |
 | `remove-recipient` | Revoke an age recipient and re-encrypt protected files without it |

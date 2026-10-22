@@ -60,6 +60,7 @@ func newRootCommand() *cobra.Command {
 		newInitCommand(&opts),
 		newPathCommand(&opts, false),
 		newPathCommand(&opts, true),
+		newHistoryCommand(&opts),
 		newJoinCommand(&opts),
 		newAddRecipientCommand(&opts),
 		newRemoveRecipientCommand(&opts),
@@ -111,6 +112,23 @@ func newPathCommand(base *setup.Options, remove bool) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringSliceVar(&paths, "protect", nil, "paths (comma-separated or repeatable); positional paths are also accepted")
+	return cmd
+}
+
+func newHistoryCommand(base *setup.Options) *cobra.Command {
+	var paths []string
+	var approved bool
+	cmd := &cobra.Command{
+		Use: "encrypt-history", Short: "Encrypt historical versions in place across all refs (requires explicit approval)",
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			o := *base
+			o.Protect = paths
+			return setup.EncryptHistory(o, approved)
+		},
+	}
+	cmd.Flags().StringSliceVar(&paths, "protect", nil, "additional historical paths, including former names (comma-separated or repeatable)")
+	cmd.Flags().BoolVar(&approved, "confirm-rewrite", false, "explicitly approve the warned in-place history rewrite (for noninteractive use)")
 	return cmd
 }
 
