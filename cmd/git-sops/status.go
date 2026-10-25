@@ -1,15 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/lalibi/git-sops/internal/gitx"
 	"github.com/lalibi/git-sops/internal/setup"
 	"github.com/lalibi/git-sops/internal/sopsx"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 func newStatusCommand(o *setup.Options) *cobra.Command {
@@ -69,21 +74,22 @@ func newStatusCommand(o *setup.Options) *cobra.Command {
 				return err
 			}
 			s := &sopsx.Client{Exe: exe, Dir: root}
-			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "PATH\tPROTECTION\tINDEX")
-			failed := false
+			var rows []statusRow
+			protectedCount, issues := 0, 0
 			for _, path := range files {
 				protection, state := "unprotected", "unmerged (!)"
 				if protected[path] {
 					protection = "protected"
+					protectedCount++
 				}
+				problem := false
 				if unmerged[path] {
-					failed = true
+					problem = true
 				} else if submodules[path] {
 					state = "submodule"
 					if protected[path] {
 						state = "submodule (!)"
-						failed = true
+						problem = true
 					}
 				} else {
 					blob, err := g.Run(nil, "cat-file", "blob", ":"+path)
@@ -96,8 +102,11 @@ func newStatusCommand(o *setup.Options) *cobra.Command {
 						state = "encrypted"
 					} else if protected[path] {
 						state = "plaintext (!)"
-						failed = true
+						problem = true
 					}
+				}
+				if problem {
+					issues++
 				}
 				if onlyProtected && !protected[path] || onlyUnprotected && protected[path] {
 					continue
@@ -106,13 +115,12 @@ func newStatusCommand(o *setup.Options) *cobra.Command {
 				if strings.ContainsAny(path, "\t\r\n") {
 					label = strconv.Quote(path)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\n", label, protection, state)
+				rows = append(rows, statusRow{label, protection, state})
 			}
-			if err := w.Flush(); err != nil {
+			if err := renderStatus(cmd.OutOrStdout(), root, rows, len(files), protectedCount, issues); err != nil {
 				return err
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "\nIndex only; protected working-tree files normally contain plaintext.")
-			if failed {
+			if issues > 0 {
 				return &setup.ExitCodeError{Code: 1, Message: "Index contains protected entries without SOPS encryption or unresolved conflicts."}
 			}
 			return nil
@@ -122,4 +130,59 @@ func newStatusCommand(o *setup.Options) *cobra.Command {
 	cmd.Flags().BoolVar(&onlyUnprotected, "unprotected", false, "show only files without staged filter=sops")
 	cmd.MarkFlagsMutuallyExclusive("protected", "unprotected")
 	return cmd
+}
+
+type statusRow struct{ path, protection, state string }
+
+func renderStatus(out io.Writer, root string, rows []statusRow, tracked, protected, issues int) error {
+	// Format before coloring so ANSI escapes never affect column alignment.
+	var table bytes.Buffer
+	w := tabwriter.NewWriter(&table, 0, 4, 3, ' ', 0)
+	fmt.Fprintln(w, "  PATH\tPROTECTION\tINDEX")
+	fmt.Fprintln(w, "  ----\t----------\t-----")
+	for _, row := range rows {
+		fmt.Fprintf(w, "  %s\t%s\t%s\n", row.path, row.protection, row.state)
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	r := lipgloss.NewRenderer(out)
+	color := out == os.Stdout && term.IsTerminal(int(os.Stdout.Fd())) && os.Getenv("NO_COLOR") == ""
+	style := func(s, shade string, bold bool) string {
+		if !color {
+			return s
+		}
+		return r.NewStyle().Foreground(lipgloss.Color(shade)).Bold(bold).Render(s)
+	}
+	var report bytes.Buffer
+	fmt.Fprintln(&report, style("git-sops status", "6", true))
+	fmt.Fprintln(&report, style(root, "8", false))
+	fmt.Fprintf(&report, "\n%d tracked  |  %d protected  |  %d unprotected  |  %d issues\n\n", tracked, protected, tracked-protected, issues)
+	lines := strings.Split(strings.TrimSuffix(table.String(), "\n"), "\n")
+	for i, line := range lines {
+		shade := "8"
+		if i >= 2 {
+			row := rows[i-2]
+			if strings.Contains(row.state, "(!)") {
+				shade = "1"
+			} else if row.state == "encrypted" {
+				shade = "2"
+			}
+		}
+		fmt.Fprintln(&report, style(line, shade, i == 0))
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(&report, "  No files match this filter.")
+	}
+	if len(rows) != tracked {
+		fmt.Fprintf(&report, "\nShowing %d of %d tracked files; issue count includes hidden files.\n", len(rows), tracked)
+	}
+	if protected == 0 && issues == 0 {
+		fmt.Fprintln(&report, style("\nNo protected entries in the index.", "8", false))
+	} else if issues == 0 {
+		fmt.Fprintln(&report, style("\nAll protected index entries are encrypted.", "2", false))
+	}
+	fmt.Fprintln(&report, style("\nIndex only; protected working-tree files normally contain plaintext.", "8", false))
+	_, err := out.Write(report.Bytes())
+	return err
 }
