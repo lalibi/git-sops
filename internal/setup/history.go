@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -101,6 +103,7 @@ func EncryptHistory(o Options, approved bool) error {
 	ui.Warnf("Selected paths: %s. Renamed historical paths must be listed explicitly; submodule histories are not traversed.", strings.Join(paths, ", "))
 	ui.Warnf("A recovery bundle is retained in the Git directory. It and old unreachable objects contain the ORIGINAL plaintext history.")
 	ui.Warnf("Remotes, forks, other clones and hosting caches are unchanged. Rotate any exposed credentials. No push or pruning is performed.")
+	ui.Warnf("Rewriting remote-tracking refs invalidates plain --force-with-lease. Publish using an explicit original remote tip from the recovery bundle.")
 	if !approved {
 		if !ui.Interactive() {
 			return errors.New("explicit approval required: rerun interactively, or pass --confirm-rewrite to acknowledge these warnings")
@@ -255,7 +258,54 @@ func EncryptHistory(o Options, approved bool) error {
 		return fmt.Errorf("rewrite failed; recovery bundle: %s: %w", backup, err)
 	}
 	ui.Okf("History encrypted in place. Review all refs before publishing. No remote was changed.")
+	ui.Warnf("Plain --force-with-lease uses rewritten tracking refs and can report 'stale info'. Use the original remote tip as an explicit lease.")
+	if hint := historyPushHint(e.Git, refs, headRef); hint != "" {
+		ui.Printf("After review, publish the current branch to its upstream with:")
+		ui.Printf("  %s", hint)
+	}
+	ui.Printf("Original tips for other refs are available with: %s", displayGitCommand("bundle", "list-heads", backup))
 	return nil
+}
+
+// Remote-tracking refs are rewritten to avoid retaining reachable plaintext.
+// The push lease must instead use the tip observed before the rewrite.
+func historyPushHint(g *gitx.Git, original map[string]string, headRef string) string {
+	if !strings.HasPrefix(headRef, "refs/heads/") {
+		return ""
+	}
+	branch := strings.TrimPrefix(headRef, "refs/heads/")
+	remote, err := g.Output("config", "--get", "branch."+branch+".remote")
+	if err != nil || remote == "" || remote == "." {
+		return ""
+	}
+	merge, err := g.Output("config", "--get-all", "branch."+branch+".merge")
+	if err != nil || strings.ContainsAny(merge, "\r\n") || !strings.HasPrefix(merge, "refs/heads/") {
+		return ""
+	}
+	upstream, err := g.Output("rev-parse", "--symbolic-full-name", "--verify", "--end-of-options", branch+"@{upstream}")
+	if err != nil || original[upstream] == "" {
+		return ""
+	}
+	return displayGitCommand("push", "--force-with-lease="+merge+":"+original[upstream], "--", remote, headRef+":"+merge)
+}
+
+var simpleGitArgument = regexp.MustCompile(`^[A-Za-z0-9_./:@=+-]+$`)
+
+// Quote uncommon ref or remote names for the user's platform, without executing
+// the displayed command or expanding shell metacharacters.
+func displayGitCommand(args ...string) string {
+	parts := []string{"git"}
+	for _, arg := range args {
+		if !simpleGitArgument.MatchString(arg) {
+			if runtime.GOOS == "windows" {
+				arg = "'" + strings.ReplaceAll(arg, "'", "''") + "'"
+			} else {
+				arg = "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
+			}
+		}
+		parts = append(parts, arg)
+	}
+	return strings.Join(parts, " ")
 }
 
 type historyRewriter struct {

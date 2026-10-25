@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -24,6 +25,18 @@ func TestRewriteHeadersPreservesMetadataAndRemovesInvalidSignatures(t *testing.T
 	want := "tree newtree\nparent newparent\nauthor A <a@example.com> 123 +0200\ncommitter C <c@example.com> 456 -0300\nencoding UTF-8\n\nmessage\nwith blank\n\nlines\n"
 	if string(got) != want {
 		t.Fatalf("rewritten commit = %q", got)
+	}
+}
+
+func TestDisplayGitCommandQuotesShellMetacharacters(t *testing.T) {
+	got := displayGitCommand("push", "--force-with-lease=refs/heads/main:abc123", "--", "remote'$(name)", "refs/heads/main:refs/heads/published")
+	quoted := "'remote'\"'\"'$(name)'"
+	if runtime.GOOS == "windows" {
+		quoted = "'remote''$(name)'"
+	}
+	want := "git push --force-with-lease=refs/heads/main:abc123 -- " + quoted + " refs/heads/main:refs/heads/published"
+	if got != want {
+		t.Fatalf("displayed command = %q, want %q", got, want)
 	}
 }
 

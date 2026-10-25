@@ -269,3 +269,53 @@ func TestEncryptHistoryRejectsPathlessBlobRefsBeforePreparingCommits(t *testing.
 		s.git(repo, "update-ref", "-d", ref)
 	}
 }
+
+func TestEncryptHistoryPrintsOriginalLeaseForPublishing(t *testing.T) {
+	s := newSandbox(t)
+	repo := protectedRepo(t, s)
+	s.git(repo, "commit", "-m", "protect secrets")
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	s.git(filepath.Dir(remote), "clone", "--bare", repo, remote)
+	s.git(remote, "branch", "-m", "main", "published")
+	s.git(repo, "remote", "add", "publishing", remote)
+	// Exercise a different branch name and a custom fetch destination, rather
+	// than assuming origin/<local-branch> is always the tracking ref.
+	s.git(repo, "config", "remote.publishing.fetch", "+refs/heads/*:refs/remotes/custom-cache/*")
+	s.git(repo, "fetch", "publishing")
+	s.git(repo, "config", "branch.main.remote", "publishing")
+	s.git(repo, "config", "branch.main.merge", "refs/heads/published")
+	oldRemoteTip := strings.TrimSpace(s.git(repo, "rev-parse", "refs/remotes/custom-cache/published"))
+	out := s.mustGitSops(repo, "encrypt-history", "--confirm-rewrite")
+	lease := "--force-with-lease=refs/heads/published:" + oldRemoteTip
+	wantHint := "git push " + lease + " -- publishing refs/heads/main:refs/heads/published"
+	if !strings.Contains(out, wantHint) {
+		t.Fatalf("missing original-tip push hint %q:\n%s", wantHint, out)
+	}
+	newTip := strings.TrimSpace(s.git(repo, "rev-parse", "main"))
+	if tracked := strings.TrimSpace(s.git(repo, "rev-parse", "refs/remotes/custom-cache/published")); tracked == oldRemoteTip {
+		t.Fatal("tracking ref was not rewritten")
+	}
+	r := s.run(repo, "git", "push", "--force-with-lease", "publishing", "main:published")
+	if r.code == 0 || !strings.Contains(r.out, "stale info") {
+		t.Fatalf("plain lease should reject rewritten tracking tip: %+v", r)
+	}
+	s.git(repo, "push", "--dry-run", lease, "--", "publishing", "refs/heads/main:refs/heads/published")
+	// A server-side update after the original snapshot must still reject the
+	// explicit lease, even though the rewrite changed our tracking ref.
+	tree := strings.TrimSpace(s.git(remote, "rev-parse", oldRemoteTip+"^{tree}"))
+	concurrent := strings.TrimSpace(s.git(remote, "commit-tree", tree, "-p", oldRemoteTip, "-m", "concurrent remote update"))
+	s.git(remote, "update-ref", "refs/heads/published", concurrent, oldRemoteTip)
+	r = s.run(repo, "git", "push", lease, "--", "publishing", "refs/heads/main:refs/heads/published")
+	if r.code == 0 || !strings.Contains(r.out, "stale info") {
+		t.Fatalf("explicit lease ignored concurrent update: %+v", r)
+	}
+	if got := strings.TrimSpace(s.git(remote, "rev-parse", "published")); got != concurrent {
+		t.Fatal("concurrent remote update was overwritten")
+	}
+	// Restore only this disposable test remote, then exercise the printed push.
+	s.git(remote, "update-ref", "refs/heads/published", oldRemoteTip, concurrent)
+	s.git(repo, "push", lease, "--", "publishing", "refs/heads/main:refs/heads/published")
+	if got := strings.TrimSpace(s.git(remote, "rev-parse", "published")); got != newTip {
+		t.Fatal("explicit lease did not publish rewritten history")
+	}
+}

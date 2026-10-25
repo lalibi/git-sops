@@ -1090,6 +1090,21 @@ Historical rename detection is not automatic: list all former paths that need pr
 
 **Publishing is a separate, coordinated operation.** Review branches and tags, test a fresh clone with `git-sops join`, and arrange force pushes and fresh clones with collaborators. Remotes, forks and hosting caches are unchanged. The recovery bundle, reflogs and unreachable local objects retain the original history, possibly including plaintext. Keep the bundle securely and decide separately how to remove obsolete copies after validation. Rotate any credentials previously exposed in plaintext.
 
+Remote-tracking refs are rewritten too, so plain `git push --force-with-lease` can fail with **`stale info`**: the local tracking ID is now a rewritten commit, while the server still has an original commit. After a successful rewrite, the command prints a push command for the current branch's configured upstream using its **original remote tip** as an explicit lease. Review that command before running it. It will refuse the push if the server's branch has advanced from the original tip.
+
+For a previously completed rewrite, recover the original tracking tip from the printed recovery bundle. For example, from the affected repository in PowerShell:
+
+```powershell
+$bundle = '.git/git-sops-before-history-<printed-timestamp>.bundle'
+$trackingRef = 'refs/remotes/origin/master'
+$entry = @(git bundle list-heads $bundle $trackingRef)
+if ($LASTEXITCODE -ne 0 -or $entry.Count -ne 1) { throw 'Could not recover the original remote tip.' }
+$expected = ($entry[0] -split '\s+')[0]
+git push "--force-with-lease=refs/heads/master:$expected" origin refs/heads/master:refs/heads/master
+```
+
+Use the correct remote and branch names for each branch you publish. This protects against server-side updates since the original tracking snapshot; it does not check whether the local branch incorporated every commit already known at that time. If the explicit lease is rejected, inspect the remote changes before deciding how to proceed. Fetching and then blindly retrying plain `--force-with-lease` replaces the original expectation with the latest remote tip and can overwrite changes you have not included. An ordinary `--force` push also discards the lease protection.
+
 For recovery, inspect `git bundle list-heads <printed-bundle-path>` or clone the bundle into a separate directory. Keep the original bundle until the rewritten history has been independently verified.
 
 ---
