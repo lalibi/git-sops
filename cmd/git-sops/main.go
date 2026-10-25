@@ -67,6 +67,7 @@ func newRootCommand() *cobra.Command {
 		newRemoveRecipientCommand(&opts),
 		newMigrateCommand(&opts),
 		newCheckCommand(&opts),
+		newStatusCommand(&opts),
 		newInstallSopsCommand(),
 		newDecryptCommand(),
 		newFilterCommand("clean"),
