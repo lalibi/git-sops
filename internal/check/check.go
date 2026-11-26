@@ -2,6 +2,7 @@
 package check
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,11 +18,13 @@ import (
 	"github.com/lalibi/git-sops/internal/ui"
 )
 
-type report struct{ failed bool }
+type report struct{ failed, warned bool }
 
 func (r *report) row(status ui.Status, label, value string, details ...string) {
 	if status == ui.StatusFail {
 		r.failed = true
+	} else if status == ui.StatusWarn {
+		r.warned = true
 	}
 	ui.Row(status, label, value, details...)
 }
@@ -50,7 +53,11 @@ func Run(repoPath string) error {
 	if r.failed {
 		return &setup.ExitCodeError{Code: 1}
 	}
-	ui.Okf("Everything looks good")
+	if r.warned {
+		ui.Warnf("Check completed with warnings")
+	} else {
+		ui.Okf("Everything looks good")
+	}
 	return nil
 }
 
@@ -93,17 +100,27 @@ func identity(r *report, id *agekey.Identity) {
 }
 
 func repository(r *report, g *gitx.Git, sopsExe, root string, id *agekey.Identity) {
-	managed, _ := config.ReadManaged(filepath.Join(root, ".sops.yaml"))
+	data, err := os.ReadFile(filepath.Join(root, ".sops.yaml"))
+	var managed *config.Managed
+	if err == nil {
+		managed = config.ParseManaged(data)
+	}
 	clean, _ := g.Output("config", "--local", "--get", "filter.sops.clean")
 
-	if managed == nil && clean == "" {
+	if clean == "" && managed == nil && (err == nil || errors.Is(err, os.ErrNotExist)) {
 		r.row(ui.StatusInfo, "git-sops", "not set up here", "Run `git-sops init` to protect files in this repository.")
 		return
 	}
 
-	if managed == nil {
-		r.row(ui.StatusWarn, ".sops.yaml", "not managed by git-sops", "`add-recipient` and `init` need a git-sops generated file.")
-	} else {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		r.row(ui.StatusFail, ".sops.yaml", "missing", "Restore the repository's SOPS creation rules before encrypting new files.")
+	case err != nil:
+		r.row(ui.StatusFail, ".sops.yaml", "could not read policy", err.Error())
+	case managed == nil:
+		r.row(ui.StatusWarn, ".sops.yaml", "no git-sops management header",
+			"For a custom policy, manage creation rules and recipients in .sops.yaml. The recipient check was skipped.")
+	default:
 		r.row(ui.StatusOK, ".sops.yaml",
 			fmt.Sprintf("%d recipient(s)", len(managed.Recipients)),
 			"protects: "+strings.Join(managed.ProtectedPaths, ", "))

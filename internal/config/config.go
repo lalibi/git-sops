@@ -126,23 +126,6 @@ func Protected(specs []Spec, path string) bool {
 	return false
 }
 
-func readLines(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	text := strings.ReplaceAll(string(data), "\r\n", "\n")
-	text = strings.TrimSuffix(text, "\n")
-	if text == "" {
-		return nil, nil
-	}
-	return strings.Split(text, "\n"), nil
-}
-
 func writeLines(path string, lines []string) error {
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
 }
@@ -240,12 +223,21 @@ type Managed struct {
 
 // ReadManaged returns the data of a generated .sops.yaml, or nil when the file is absent or hand-written.
 func ReadManaged(path string) (*Managed, error) {
-	lines, err := readLines(path)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	if len(lines) == 0 || (lines[0] != SopsMarker && lines[0] != LegacySopsMarker) {
-		return nil, nil
+	return ParseManaged(data), nil
+}
+
+// ParseManaged reads git-sops metadata only from policies bearing a generated header.
+func ParseManaged(data []byte) *Managed {
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	if lines[0] != SopsMarker && lines[0] != LegacySopsMarker {
+		return nil
 	}
 
 	m := &Managed{}
@@ -256,7 +248,7 @@ func ReadManaged(path string) (*Managed, error) {
 			m.Recipients = append(m.Recipients, g[1])
 		}
 	}
-	return m, nil
+	return m
 }
 
 // WriteSopsConfig writes the managed .sops.yaml. A hand-written file is only replaced with force, after a backup.

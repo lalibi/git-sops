@@ -355,6 +355,38 @@ func TestCheckReportsHealthyAndUnconfiguredRepos(t *testing.T) {
 	}
 }
 
+func TestCheckDistinguishesCustomMissingAndUnreadablePolicies(t *testing.T) {
+	s := newSandbox(t)
+	repo := protectedRepo(t, s)
+	policy := filepath.Join(repo, ".sops.yaml")
+	managed := read(t, policy)
+	_, rules, ok := strings.Cut(managed, "creation_rules:")
+	if !ok {
+		t.Fatal("fixture has no creation rules")
+	}
+	write(t, policy, "creation_rules:"+rules)
+	r := s.gitSops(repo, "check")
+	if r.code != 0 || !strings.Contains(r.out, "no git-sops management header") ||
+		!strings.Contains(r.out, "Check completed with warnings") || strings.Contains(r.out, "Everything looks good") ||
+		!strings.Contains(r.out, "2 protected file(s), all ciphertext") {
+		t.Fatalf("custom policy (code %d):\n%s", r.code, r.out)
+	}
+	if err := os.Remove(policy); err != nil {
+		t.Fatal(err)
+	}
+	r = s.gitSops(repo, "check")
+	if r.code != 1 || !strings.Contains(r.out, ".sops.yaml: missing") {
+		t.Fatalf("missing policy (code %d):\n%s", r.code, r.out)
+	}
+	if err := os.Mkdir(policy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r = s.gitSops(repo, "check")
+	if r.code != 1 || !strings.Contains(r.out, "could not read policy") {
+		t.Fatalf("unreadable policy (code %d):\n%s", r.code, r.out)
+	}
+}
+
 func TestInitUpgradesLegacyPowerShellSetup(t *testing.T) {
 	s := newSandbox(t)
 	repo := protectedRepo(t, s)
