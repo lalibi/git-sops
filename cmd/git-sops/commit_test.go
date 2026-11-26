@@ -196,7 +196,6 @@ func TestCommitFailureKeepsPreparedChanges(t *testing.T) {
 }
 
 func TestMigrateGitCryptCanCommitPreparedSopsFiles(t *testing.T) {
-	s := newSandbox(t)
 	// Stand in for git-crypt's status command; the repository represents an unlocked
 	// checkout. The migration and subsequent encryption use the real Git and SOPS.
 	toolDir := t.TempDir()
@@ -210,18 +209,43 @@ func TestMigrateGitCryptCanCommitPreparedSopsFiles(t *testing.T) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build status stub: %v\n%s", err, out)
 	}
-	s.env = append(s.env, "PATH="+toolDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	repo := filepath.Join(t.TempDir(), "repo")
-	s.git(filepath.Dir(repo), "init", "-b", "main", repo)
-	write(t, filepath.Join(repo, ".gitattributes"), "/secrets/** filter=git-crypt diff=git-crypt\n")
-	write(t, filepath.Join(repo, "secrets", "token.txt"), "unlocked secret\n")
-	s.git(repo, "add", ".")
-	s.git(repo, "commit", "-m", "unlocked git-crypt checkout")
-	s.mustGitSops(repo, "migrate-git-crypt", "--protect", "secrets/", "--yes", "--commit")
-	if message := s.git(repo, "log", "-1", "--format=%B"); !strings.Contains(message, "Migrate git-crypt protection to SOPS") || !strings.Contains(message, "- secrets/\n") {
-		t.Fatalf("migration message = %q", message)
-	}
-	if blob := s.git(repo, "cat-file", "blob", "HEAD:secrets/token.txt"); !strings.Contains(blob, "sops") || strings.Contains(blob, "unlocked secret") {
-		t.Fatal("migration committed plaintext")
+	for _, tc := range []struct {
+		name  string
+		flags []string
+		rule  string
+	}{
+		{"default", nil, "secrets/"},
+		{"explicit", []string{"--protect", "certs/"}, "certs/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSandbox(t)
+			s.env = append(s.env, "PATH="+toolDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			repo := filepath.Join(t.TempDir(), "repo")
+			s.git(filepath.Dir(repo), "init", "-b", "main", repo)
+			write(t, filepath.Join(repo, ".gitattributes"), "/secrets/** filter=git-crypt diff=git-crypt\n*.env filter=git-crypt diff=git-crypt\n/certs/** filter=git-crypt-team diff=git-crypt-team\n")
+			files := map[string]string{
+				".env":                         "TOKEN=unlocked-secret\n",
+				"secrets/token.txt":            "unlocked-secret\n",
+				"certs/Multi-Domain Setup.rar": "\x00unlocked-secret\xff",
+			}
+			for path, plain := range files {
+				write(t, filepath.Join(repo, path), plain)
+			}
+			s.git(repo, "add", ".")
+			s.git(repo, "commit", "-m", "unlocked git-crypt checkout")
+			s.mustGitSops(repo, append([]string{"migrate-git-crypt", "--yes", "--commit"}, tc.flags...)...)
+			if message := s.git(repo, "log", "-1", "--format=%B"); !strings.Contains(message, "Migrate git-crypt protection to SOPS") || !strings.Contains(message, "- "+tc.rule+"\n") {
+				t.Fatalf("migration message = %q", message)
+			}
+			for path, plain := range files {
+				blob := s.git(repo, "cat-file", "blob", "HEAD:"+path)
+				if !strings.Contains(blob, "sops") || strings.Contains(blob, "unlocked-secret") {
+					t.Errorf("invalid committed ciphertext for %s", path)
+				}
+				if read(t, filepath.Join(repo, path)) != plain {
+					t.Errorf("working copy changed for %s", path)
+				}
+			}
+		})
 	}
 }

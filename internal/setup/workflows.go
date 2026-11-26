@@ -619,6 +619,29 @@ func MigrateGitCrypt(o Options) error {
 	if err != nil {
 		return err
 	}
+	// Capture the effective git-crypt filters before rewriting .gitattributes.
+	files, err := e.Git.TrackedFilterPaths(func(driver string) bool {
+		return driver == "git-crypt" || strings.HasPrefix(driver, "git-crypt-")
+	})
+	if err != nil {
+		return err
+	}
+	var uncovered []string
+	for _, path := range files {
+		if !config.Protected(specs, path) {
+			uncovered = append(uncovered, path)
+		}
+	}
+	discovered, err := config.BuildSpecs(e.Root, uncovered)
+	if err != nil {
+		return err
+	}
+	for i, spec := range discovered {
+		if spec.RelativePath != uncovered[i] || spec.IsDirectory {
+			return fmt.Errorf("cannot represent git-crypt file %q as an exact protected path", uncovered[i])
+		}
+	}
+	specs = append(specs, discovered...)
 
 	if err := confirmReplaceSopsConfig(e, &o); err != nil {
 		return err

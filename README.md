@@ -1222,7 +1222,13 @@ Do **not** run `git-crypt lock` during the conversion: the goal is to keep the c
 
 ## 22.2 Automated migration
 
-Pass the actual protected files/directories explicitly:
+Run from a clean, unlocked checkout. The command includes every tracked file with an effective `git-crypt` or named `git-crypt-*` filter.
+
+```text
+git-sops migrate-git-crypt --commit
+```
+
+By default the managed policy also covers `secrets/`. Use `--protect` to select additional files or directories in place of that default. A directory rule covers future files too. Files discovered through git-crypt that fall outside these directories get individual entries in `.sops.yaml`.
 
 ```text
 git-sops migrate-git-crypt --protect secrets/ --protect appsettings.json

@@ -110,6 +110,26 @@ func (g *Git) ZList(args ...string) ([]string, error) {
 	return result, nil
 }
 
+// TrackedFilterPaths returns paths whose effective filter in the index matches keep.
+func (g *Git) TrackedFilterPaths(keep func(string) bool) ([]string, error) {
+	files, err := g.Run(nil, "ls-files", "-z")
+	if err != nil || len(files) == 0 {
+		return nil, err
+	}
+	out, err := g.Run(files, "check-attr", "--cached", "-z", "--stdin", "filter")
+	if err != nil {
+		return nil, err
+	}
+	fields := strings.Split(string(out), "\x00")
+	var paths []string
+	for i := 0; i+2 < len(fields); i += 3 {
+		if keep(fields[i+2]) {
+			paths = append(paths, fields[i])
+		}
+	}
+	return paths, nil
+}
+
 var versionPattern = regexp.MustCompile(`(\d+)\.(\d+)(?:\.(\d+))?`)
 
 func (g *Git) Version() ([3]int, error) {

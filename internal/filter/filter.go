@@ -4,7 +4,6 @@ package filter
 import (
 	"bytes"
 	"fmt"
-	"strings"
 
 	"github.com/lalibi/git-sops/internal/gitx"
 	"github.com/lalibi/git-sops/internal/sopsx"
@@ -66,16 +65,8 @@ func Clean(g *gitx.Git, s *sopsx.Client, path string, input []byte) ([]byte, err
 // VerifyIndex checks every tracked file carrying filter=sops and returns how many it checked
 // plus those whose index blob is not SOPS ciphertext.
 func VerifyIndex(g *gitx.Git, s *sopsx.Client) (checked int, failures []string, err error) {
-	files, err := g.ZList("ls-files", "-z")
-	if err != nil {
-		return 0, nil, err
-	}
-	if len(files) == 0 {
-		return 0, nil, nil
-	}
-
 	// Attributes are read from the index so a staged .gitattributes change cannot weaken validation.
-	protected, err := protectedFromIndex(g, files)
+	protected, err := g.TrackedFilterPaths(func(driver string) bool { return driver == "sops" })
 	if err != nil {
 		return 0, nil, err
 	}
@@ -87,23 +78,4 @@ func VerifyIndex(g *gitx.Git, s *sopsx.Client) (checked int, failures []string, 
 		}
 	}
 	return len(protected), failures, nil
-}
-
-func protectedFromIndex(g *gitx.Git, files []string) ([]string, error) {
-	input := strings.Join(files, "\x00") + "\x00"
-
-	out, err := g.Run([]byte(input), "check-attr", "--cached", "-z", "--stdin", "filter")
-	if err != nil {
-		return nil, err
-	}
-
-	// Output is a repeating triple: path, attribute, value.
-	fields := strings.Split(string(out), "\x00")
-	var protected []string
-	for i := 0; i+2 < len(fields); i += 3 {
-		if fields[i+2] == "sops" {
-			protected = append(protected, fields[i])
-		}
-	}
-	return protected, nil
 }

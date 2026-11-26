@@ -202,7 +202,7 @@ func newMigrateCommand(o *setup.Options) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  func(*cobra.Command, []string) error { return setup.MigrateGitCrypt(*o) },
 	}
-	cmd.Flags().StringSliceVar(&o.Protect, "protect", nil, "file or directory to protect (comma-separated or repeatable); defaults to secrets/")
+	cmd.Flags().StringSliceVar(&o.Protect, "protect", nil, "file or directory to protect in addition to tracked git-crypt files (comma-separated or repeatable); defaults to secrets/")
 	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "additional age public recipient (repeatable)")
 	cmd.Flags().StringVar(&o.AgeKeySource, "age-key", "", "import an age identity file first")
 	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage the generated changes")
