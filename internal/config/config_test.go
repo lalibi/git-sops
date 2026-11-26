@@ -128,6 +128,50 @@ func TestUpdateAttributesRejectsMalformedBlock(t *testing.T) {
 	}
 }
 
+func TestCompactMigratedAttributes(t *testing.T) {
+	const attrs = " filter=sops merge=sops diff=sops -text\n"
+	const existing = "**/*.env" + attrs + "secrets.md" + attrs + "\n_backups/**" + attrs +
+		"\ncerts/**" + attrs + "secrets/**" + attrs +
+		"\n# CoreOS runs these scripts directly; preserve Unix line endings.\nobservability/*.sh text eol=lf\n"
+	specs, err := BuildSpecs(t.TempDir(), []string{"secrets/", ".env", "observability/portal.env",
+		"certs/name with spaces.pem", "_backups/db/db.dump", "secrets.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBlock, err := RenderAttributes(nil, specs, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []string{existing, existing + "\n" + string(oldBlock)} {
+		got, err := RenderAttributes([]byte(input), specs, false)
+		if err != nil || string(got) != existing {
+			t.Fatalf("compacted attributes = %q, %v", got, err)
+		}
+	}
+}
+
+func TestKeepRulesForIncompleteOrOverriddenCoverage(t *testing.T) {
+	const full = " filter=sops diff=sops merge=sops -text\n"
+	for _, tc := range []struct{ path, before string }{
+		{"dir/", "dir/*.env" + full},
+		{"dir/", "dir/**" + full + "dir/future*.txt -filter\n"},
+		{"dir/file.env", "**/*.env" + full + "/dir/file.env text\n"},
+		{"dir/file.env", "**/*.env" + full + "DIR/** -diff\n"},
+		{"dir/file.env", "dir/** filter=sops -text\n"},
+		{"dir/file.env", "other/**" + full},
+		{"dir/file.env", "dir/**" + full + "**/dir/file.env -filter\n"},
+	} {
+		specs, err := BuildSpecs(t.TempDir(), []string{tc.path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := RenderAttributes([]byte(tc.before), specs, false)
+		if err != nil || !strings.Contains(string(got), AttributesBegin+"\n"+specs[0].AttributePattern+full) {
+			t.Errorf("explicit rule for %s missing after %q: %s, %v", tc.path, tc.before, got, err)
+		}
+	}
+}
+
 func TestSopsConfigRoundTrip(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "secrets"), 0o755); err != nil {

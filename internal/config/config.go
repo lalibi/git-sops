@@ -203,23 +203,31 @@ func RenderAttributes(data []byte, specs []Spec, migrateGitCrypt bool) ([]byte, 
 		return nil, errors.New("the managed .gitattributes block is malformed")
 	}
 
-	block := []string{AttributesBegin}
-	for _, s := range specs {
-		block = append(block, s.AttributePattern+" filter=sops diff=sops merge=sops -text")
-	}
-	block = append(block, AttributesEnd)
-
-	var out []string
+	before := lines
 	if begin >= 0 {
-		out = append(out, lines[:begin]...)
-		out = append(out, block...)
-		out = append(out, lines[end+1:]...)
-	} else {
-		out = append(out, lines...)
-		if len(out) > 0 && out[len(out)-1] != "" {
+		before = lines[:begin]
+	}
+	var rules []string
+	for _, s := range specs {
+		if !coveredByAttributes(before, s) {
+			rules = append(rules, s.AttributePattern+" filter=sops diff=sops merge=sops -text")
+		}
+	}
+
+	out := append([]string(nil), before...)
+	// Retain the insertion point when later rules have higher precedence.
+	if len(rules) > 0 || (end >= 0 && end+1 < len(lines)) {
+		if begin < 0 && len(out) > 0 && out[len(out)-1] != "" {
 			out = append(out, "")
 		}
-		out = append(out, block...)
+		out = append(out, AttributesBegin)
+		out = append(out, rules...)
+		out = append(out, AttributesEnd)
+	} else if begin > 0 && out[len(out)-1] == "" {
+		out = out[:len(out)-1]
+	}
+	if end >= 0 {
+		out = append(out, lines[end+1:]...)
 	}
 
 	return []byte(strings.Join(out, "\n") + "\n"), nil

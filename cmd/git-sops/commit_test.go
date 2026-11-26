@@ -234,6 +234,10 @@ func TestMigrateGitCryptCanCommitPreparedSopsFiles(t *testing.T) {
 			s.git(repo, "add", ".")
 			s.git(repo, "commit", "-m", "unlocked git-crypt checkout")
 			s.mustGitSops(repo, append([]string{"migrate-git-crypt", "--yes", "--commit"}, tc.flags...)...)
+			attrs := s.git(repo, "cat-file", "blob", "HEAD:.gitattributes")
+			if strings.Contains(attrs, "# BEGIN SOPS") || strings.Count(attrs, "filter=sops") != 3 {
+				t.Fatalf("migration should keep the three converted patterns: %s", attrs)
+			}
 			if message := s.git(repo, "log", "-1", "--format=%B"); !strings.Contains(message, "Migrate git-crypt protection to SOPS") || !strings.Contains(message, "- "+tc.rule+"\n") {
 				t.Fatalf("migration message = %q", message)
 			}
@@ -244,6 +248,19 @@ func TestMigrateGitCryptCanCommitPreparedSopsFiles(t *testing.T) {
 				}
 				if read(t, filepath.Join(repo, path)) != plain {
 					t.Errorf("working copy changed for %s", path)
+				}
+			}
+			if tc.name == "default" {
+				// Recreate the v0.3.2 index, then refresh it with the existing policy.
+				const suffix = " filter=sops diff=sops merge=sops -text\n"
+				old := attrs + "\n# BEGIN SOPS TRANSPARENT ENCRYPTION\n" +
+					"/secrets/**" + suffix + "/.env" + suffix + `"/certs/Multi-Domain Setup.rar"` + suffix +
+					"# END SOPS TRANSPARENT ENCRYPTION\n"
+				write(t, filepath.Join(repo, ".gitattributes"), old)
+				s.git(repo, "add", ".gitattributes")
+				s.mustGitSops(repo, "init")
+				if got := s.git(repo, "status", "--porcelain"); got != "" {
+					t.Fatalf("refresh should restore the compact attributes and original ciphertext: %s", got)
 				}
 			}
 		})
