@@ -15,30 +15,29 @@ function Invoke-Git {
 
 $commit = Invoke-Git rev-parse --verify HEAD
 if ((Invoke-Git rev-parse --is-shallow-repository) -eq 'true') {
-    throw 'Release calculation needs the full history. Run git fetch --unshallow --tags first.'
+    throw 'Release calculation needs the full history. Run git fetch --unshallow --no-tags first.'
 }
 
+$tagRoot = 'refs/tags'
 if ($Publish) {
     if ((Invoke-Git branch --show-current) -ne 'main') {
         throw 'Switch to main before publishing.'
     }
-    Invoke-Git fetch --tags origin main
-    $publishedTags = @{}
-    foreach ($ref in (Invoke-Git ls-remote --refs --tags origin 'refs/tags/v*')) {
-        $publishedTags[$ref.Split([char]9)[1].Substring('refs/tags/'.Length)] = $true
-    }
+    # Mirror published tags separately so an older local tag can keep its own object.
+    $tagRoot = 'refs/git-sops-release/origin/tags'
+    Invoke-Git fetch --atomic --no-tags --prune --no-prune-tags origin main "+refs/tags/v*:${tagRoot}/v*"
 }
 
 $stableTag = '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
-$previous = Invoke-Git tag --merged $commit --sort=-version:refname --list 'v*' |
-    Where-Object { $_ -cmatch $stableTag -and (!$Publish -or $publishedTags.ContainsKey($_)) } |
+$previous = Invoke-Git for-each-ref "--merged=$commit" --sort=-version:refname '--format=%(refname)' "$tagRoot/v*" |
+    Where-Object { $_.Substring($tagRoot.Length + 1) -cmatch $stableTag } |
     Select-Object -First 1
 
 $range = $commit
 $base = '0.0.0'
 if ($previous) {
     $range = "$previous..$commit"
-    $base = $previous.Substring(1)
+    $base = $previous.Substring("$tagRoot/v".Length)
 }
 
 # NUL separates subjects and bodies even when commit messages span several lines.
