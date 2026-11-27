@@ -60,6 +60,23 @@ The CLI tests create temporary repositories and use real Git and SOPS. Install b
 
 Command and flag definitions live in `cmd/git-sops`. For filter and index behavior, start in `internal/filter`. For policy parsing, see `internal/config`. Clone setup, recipient changes, migration and history operations live in separate files under `internal/setup`. `internal/sopsx` runs the SOPS executable.
 
-Maintainers can preview release archives with `goreleaser release --snapshot --clean`. Pushing a version tag triggers the test matrix and, once it passes, builds the archives and publishes their checksums.
+## Release
+
+From the repository root in PowerShell 7.4 or newer, install PwshSpectreConsole once and preview the next release.
+
+```powershell
+Install-Module PwshSpectreConsole -Scope CurrentUser -MinimumVersion 2.0.0
+./scripts/release.ps1
+```
+
+The preview lists commits since the highest reachable stable version tag in your clone. A breaking change (`!` before the header colon or a `BREAKING CHANGE:` or `BREAKING-CHANGE:` footer) bumps the major version, `feat` bumps minor, and `fix` or `perf` bumps patch. The largest bump wins, including before 1.0. Other commit types alone skip the release. With no previous release, calculation starts at `v0.0.0`.
+
+Commit the changes you want to release on `main`, then publish.
+
+```powershell
+./scripts/release.ps1 -Publish
+```
+
+Publishing fetches tags from `origin`, recalculates against its published tags, and pushes the reviewed commit and an annotated version tag together. GitHub Actions builds the release archives and publishes their checksums. To preview the archives locally, run `goreleaser release --snapshot --clean`.
 
 [MIT license](LICENSE)
