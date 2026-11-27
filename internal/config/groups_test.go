@@ -3,11 +3,45 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"filippo.io/age"
 )
+
+func TestMigrateV1GroupPolicy(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".sops.yaml")
+	const key = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"
+	old := groupV1Marker + "\nrecipient_groups:\n  default: &default\n    - " + key + "\n  ops: &ops\n    - " + key +
+		"\ncreation_rules:\n# protected-path: prod.env\n  - path_regex: '^prod\\.env$'\n    age: *ops\n"
+	if err := os.WriteFile(path, []byte(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := ReadManaged(path)
+	if err != nil || before == nil || before.GroupForRule("prod.env") != "ops" {
+		t.Fatalf("v1 group policy: %+v, %v", before, err)
+	}
+	specs, err := BuildSpecs(root, before.ProtectedPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteManagedConfig(root, specs, before, false, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(data), GroupMarker+"\n") || !strings.Contains(string(data), "creation_rules:\n  # protected-path: prod.env\n  - path_regex:") {
+		t.Fatalf("unexpected migrated group policy:\n%s", data)
+	}
+	after, err := ParseManaged(data)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("changed policy on migration: %+v, %v", after, err)
+	}
+}
 
 func TestGroupedGlobsFollowSOPSPrecedence(t *testing.T) {
 	root := t.TempDir()

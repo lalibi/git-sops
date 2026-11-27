@@ -50,7 +50,7 @@ To add one more file later, run `git-sops protect path/to/file`. A normal `git a
 2. A maintainer runs `git-sops add-recipient <public-age-key> --commit`, reviews the commit, and pushes it.
 3. The collaborator pulls that commit and runs `git-sops join` again.
 
-Repositories using v0.3.2 share one recipient list. The development version also supports named groups for individual paths. Run `git-sops access` to list the public keys and their file counts, or supply one public key to see its files. Existing shared policies work across both versions. Upgrade clients and CI before enabling a named group. [Policy examples and compatibility](docs/policies.md#named-recipient-groups)
+Run `git-sops access` to list the public keys and their file counts, or supply one public key to see its files. The CLI reads existing shared and grouped policies. Its next policy write uses the v2 format with indented path comments. Upgrade clients and CI before committing the updated policy. [Policy examples and compatibility](docs/policies.md#named-recipient-groups)
 
 ## Security and operations
 
@@ -78,7 +78,7 @@ go vet ./...
 go test -count=1 -timeout 30m ./...
 ```
 
-The CLI tests create temporary repositories and use real Git and SOPS. Install both to run these tests. The mixed-version test also needs the local `v0.3.2` Git tag. CI runs the suite on all three supported operating systems.
+The CLI tests create temporary repositories and use real Git and SOPS. Install both to run these tests. The mixed-version tests also use the local `v0.3.2` and `v0.5.1` Git tags. CI runs the suite on all three supported operating systems.
 
 Command and flag definitions live in `cmd/git-sops`. For filter and index behavior, start in `internal/filter`. For policy parsing, see `internal/config`. Clone setup, recipient changes, migration and history operations live in separate files under `internal/setup`. `internal/sopsx` runs the SOPS executable.
 

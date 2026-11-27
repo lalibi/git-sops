@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"filippo.io/age"
+	"github.com/lalibi/git-sops/internal/config"
 )
 
 func groupMember(t *testing.T, s *sandbox, name string) (*sandbox, string) {
@@ -35,7 +36,7 @@ func TestAccessListsAllRecipients(t *testing.T) {
 	}{
 		{"shared", shared, []string{owner + "  2  default"}},
 		{"pending policy change", strings.ReplaceAll(shared, owner, pending), []string{owner + "  2  (index only)", pending + "  0  default", "staged recipients differ"}},
-		{"custom", strings.TrimPrefix(shared, "# Managed by git-sops\n"), []string{owner + "  2  (index only)", "staged filter=sops files only"}},
+		{"custom", strings.TrimPrefix(shared, config.SopsMarker+"\n"), []string{owner + "  2  (index only)", "staged filter=sops files only"}},
 	} {
 		write(t, policy, tc.policy)
 		out := observer.mustGitSops(repo, "access")
@@ -111,7 +112,7 @@ func TestRecipientGroups(t *testing.T) {
 	if parentBlob != s.git(repo, "rev-parse", ":secrets/token.txt") {
 		t.Fatal("assignment rekeyed an unaffected sibling")
 	}
-	if policy := read(t, filepath.Join(repo, ".sops.yaml")); !strings.HasPrefix(policy, "# Managed by git-sops (recipient groups v1)\n") || strings.Index(policy, "age: *database") > strings.Index(policy, "age: *default") {
+	if policy := read(t, filepath.Join(repo, ".sops.yaml")); !strings.HasPrefix(policy, config.GroupMarker+"\n") || strings.Index(policy, "age: *database") > strings.Index(policy, "age: *default") {
 		t.Fatalf("invalid grouped policy: %s", policy)
 	}
 	access := s.mustGitSops(repo, "access", b)

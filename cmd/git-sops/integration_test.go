@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"filippo.io/age"
+	"github.com/lalibi/git-sops/internal/config"
 	"github.com/lalibi/git-sops/internal/sopsx"
 )
 
@@ -403,7 +404,7 @@ func TestCheckDistinguishesCustomMissingAndUnreadablePolicies(t *testing.T) {
 	repo := protectedRepo(t, s)
 	policy := filepath.Join(repo, ".sops.yaml")
 	managed := read(t, policy)
-	write(t, policy, strings.TrimPrefix(managed, "# Managed by git-sops\n"))
+	write(t, policy, strings.TrimPrefix(managed, config.SopsMarker+"\n"))
 	r := s.gitSops(repo, "check")
 	if r.code != 0 || !strings.Contains(r.out, "no git-sops management header") ||
 		!strings.Contains(r.out, "Check completed with warnings") || strings.Contains(r.out, "Everything looks good") ||
@@ -444,7 +445,7 @@ func TestInitUpgradesLegacyPowerShellSetup(t *testing.T) {
 		t.Fatalf("incorrect access audit for legacy directory rule: %s", out)
 	}
 	s.mustGitSops(repo, "init")
-	if got := read(t, policy); !strings.Contains(got, owner) || !strings.Contains(got, "# protected-path: secrets/\n") || !strings.HasPrefix(got, "# Managed by git-sops\n") {
+	if got := read(t, policy); !strings.Contains(got, owner) || !strings.Contains(got, "  # protected-path: secrets/\n") || !strings.HasPrefix(got, config.SopsMarker+"\n") {
 		t.Fatal("PowerShell upgrade should retain the directory rule and shared recipient")
 	}
 

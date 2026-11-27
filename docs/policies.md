@@ -85,30 +85,30 @@ Both must agree.
 git-sops writes one creation rule per protected path. Each rule references the same list of public age recipients:
 
 ```yaml
-# Managed by git-sops
+# Managed by git-sops (v2)
 
 recipients: &recipients
   - age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 creation_rules:
-# protected-path: secrets/
+  # protected-path: secrets/
   - path_regex: '^secrets[\\/].*$'
     age: *recipients
 
-# protected-path: appsettings.json
+  # protected-path: appsettings.json
   - path_regex: '^appsettings\.json$'
     age: *recipients
 
-# protected-path: src/Web/appsettings.Production.json
+  # protected-path: src/Web/appsettings.Production.json
   - path_regex: '^src[\\/]Web[\\/]appsettings\.Production\.json$'
     age: *recipients
 ```
 
-The separator expression `[\\/]` allows both `/` and `\`. Existing managed policies with a combined regex still work. Upgrading the binary, running `join`, `check`, or `verify`, and ordinary Git operations leave the policy as written. The next policy edit, such as adding a path with `git-sops protect`, writes one rule per path and retains the shared recipients. v0.3.2 can read and edit that layout. Its next policy edit writes the combined regex again.
+The separator expression `[\\/]` allows both `/` and `\`. Existing managed policies, including those with combined regexes or flush-left path comments, are read as written. The next policy write migrates the file to the v2 header and places each path comment at the same indentation as its rule. Upgrade collaborators and CI before committing that migration. Clients through v0.5.1 treat the new header as a custom policy and refuse normal policy edits. Forcing an older `init` to overwrite the file can discard rules or recipients.
 
 ## Named recipient groups
 
-Use groups when people need different decryption access. A repository with one shared recipient list keeps the v0.3.2-compatible format even when you explicitly select `--group default`. Creating the first non-default group switches the policy format and carries the existing recipients into `default`. Upgrade collaborators and CI before committing that change. Supply each person's public age key in place of the placeholders below. Include your own public key in each group you need to decrypt.
+Use groups when people need different decryption access. Selecting `--group default` in a repository with one shared list keeps that list. Creating the first non-default group carries the existing recipients into `default`. Supply each person's public age key in place of the placeholders below. Include your own public key in each group you need to decrypt.
 
 ```sh
 git-sops group set certificates YOUR_AGE_KEY ALICE_AGE_KEY --commit
@@ -135,11 +135,11 @@ recipient_groups:
     - age1... # recovery
 
 creation_rules:
-# protected-path: secrets/production.env
+  # protected-path: secrets/production.env
   - path_regex: '^secrets[\\/]production\.env$'
     age: *certificates
 
-# protected-path: secrets/
+  # protected-path: secrets/
   - path_regex: '^secrets[\\/].*$'
     age: *default
 ```
@@ -158,7 +158,7 @@ git-sops remove-recipient BOB_AGE_KEY --everywhere --commit
 
 `group set` replaces the entire named list. `add-recipient` and `remove-recipient` edit the default list unless given `--group`. `--everywhere` removes a recipient from all lists together. Each active group and the default must retain a recipient. `check` flags single-recipient groups so you can add a second maintainer or offline recovery key. A former recipient can still read old commits and copies they already decrypted.
 
-Group policies use the header `# Managed by git-sops (recipient groups v1)`. v0.3.2 treats that file as custom and refuses `protect`, `add-recipient`, and `remove-recipient`. Forcing an old `init` to replace the file can discard the group assignments. After upgrading, run `git-sops join` to configure the clone. Authorized files decrypt normally. Files for other groups stay encrypted through checkout and `git add -A`. The pre-commit check compares the staged files' age recipients with the staged group policy. Git hosting permissions still control who can push changes.
+Group policies use the header `# Managed by git-sops (recipient groups v2)`. Existing v1 group policies retain their memberships and path assignments on migration. After upgrading, run `git-sops join` to configure the clone. Authorized files decrypt normally. Files for other groups stay encrypted through checkout and `git add -A`. The pre-commit check compares the staged files' age recipients with the staged group policy. Git hosting permissions still control who can push changes.
 
 ## File formats
 

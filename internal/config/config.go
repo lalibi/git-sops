@@ -18,7 +18,8 @@ import (
 )
 
 const (
-	SopsMarker       = "# Managed by git-sops"
+	SopsMarker       = "# Managed by git-sops (v2)"
+	sharedV1Marker   = "# Managed by git-sops"
 	LegacySopsMarker = "# Managed by Initialize-SopsGit.ps1"
 	AttributesBegin  = "# BEGIN SOPS TRANSPARENT ENCRYPTION"
 	AttributesEnd    = "# END SOPS TRANSPARENT ENCRYPTION"
@@ -27,7 +28,7 @@ const (
 var (
 	recipientPattern = regexp.MustCompile(`^age1[0-9a-z]+$`)
 	recipientLine    = regexp.MustCompile(`^\s*-\s+(age1[0-9a-z]+)\s*$`)
-	protectedLine    = regexp.MustCompile(`^#\s*protected-path:\s*(.+)$`)
+	protectedLine    = regexp.MustCompile(`^[ \t]*#\s*protected-path:\s*(.+)$`)
 	dotDot           = regexp.MustCompile(`(^|/)\.\.($|/)`)
 )
 
@@ -294,13 +295,13 @@ func ParseManaged(data []byte) (*Managed, error) {
 	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
 	m := &Managed{}
 	switch lines[0] {
-	case GroupMarker:
+	case GroupMarker, groupV1Marker:
 		var err error
 		m, err = parseGroupPolicy(data, lines)
 		if err != nil {
 			return nil, err
 		}
-	case SopsMarker, LegacySopsMarker:
+	case SopsMarker, sharedV1Marker, LegacySopsMarker:
 		for _, line := range lines {
 			if g := protectedLine.FindStringSubmatch(line); g != nil {
 				m.ProtectedPaths = append(m.ProtectedPaths, strings.TrimSpace(g[1]))
@@ -435,8 +436,7 @@ func WriteManagedConfig(root string, specs []Spec, m *Managed, force bool, warnf
 		if s.IsDirectory {
 			comment += "/"
 		}
-		// Released readers recognize protected-path comments at column one.
-		lines = append(lines, "# protected-path: "+comment)
+		lines = append(lines, "  # protected-path: "+comment)
 		lines = append(lines, "  - path_regex: '^"+strings.ReplaceAll(s.RegexPart, "'", "''")+"$'", "    age: *"+alias)
 	}
 

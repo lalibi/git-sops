@@ -4,13 +4,20 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/lalibi/git-sops/internal/config"
 )
 
 // Exercise the released parser and filters so shared changes to our reader and
 // writer cannot make an incompatible format appear to pass a round trip.
-func TestCompatibilityWithV032(t *testing.T) {
+func TestReleasedPolicyCompatibility(t *testing.T) {
+	for _, tag := range []string{"v0.3.2", "v0.5.1"} {
+		t.Run(tag, func(t *testing.T) { checkReleasedPolicyCompatibility(t, tag) })
+	}
+}
+
+func checkReleasedPolicyCompatibility(t *testing.T, tag string) {
 	s := newSandbox(t)
-	const tag = "v0.3.2"
 	if r := s.run(".", "git", "rev-parse", "--verify", "refs/tags/"+tag+"^{commit}"); r.code != 0 {
 		t.Skip("cross-version test requires the local " + tag + " tag")
 	}
@@ -55,7 +62,7 @@ func TestCompatibilityWithV032(t *testing.T) {
 	s.mustGitSops(repo, "add-recipient", "--name", "HAL9000", key, "--commit")
 	write(t, filepath.Join(repo, "service key.txt"), "shared token\n")
 	s.mustGitSops(repo, "protect", "service key.txt", "--group", "default", "--commit")
-	if !strings.HasPrefix(read(t, policy), "# Managed by git-sops\n") || !strings.Contains(read(t, policy), "age: *recipients") {
+	if !strings.HasPrefix(read(t, policy), config.SopsMarker+"\n") || !strings.Contains(read(t, policy), "age: *recipients") {
 		t.Fatal("explicit default group should keep the shared policy format")
 	}
 	clone := filepath.Join(tmp, "member")
@@ -67,28 +74,25 @@ func TestCompatibilityWithV032(t *testing.T) {
 		t.Fatal("second recipient could not read both protected paths with the released CLI")
 	}
 	old("join")
-	write(t, filepath.Join(repo, "third.txt"), "more\n")
-	old("protect", "third.txt", "--commit")
-	s.mustGitSops(repo, "verify")
-	for _, path := range []string{"secrets/token.txt", "service key.txt", "third.txt"} {
-		blob := s.git(repo, "cat-file", "blob", "HEAD:"+path)
-		if !strings.Contains(blob, owner) || !strings.Contains(blob, key) {
-			t.Fatalf("mixed-version edits lost a recipient for %q", path)
-		}
-	}
 	if s.git(repo, "rev-parse", "HEAD:secrets/token.txt") != original {
-		t.Fatal("mixed-version edits changed unrelated ciphertext")
+		t.Fatal("policy migration changed unrelated ciphertext")
 	}
 
-	s.mustGitSops(repo, "group", "set", "private", owner, "--commit")
-	s.mustGitSops(repo, "protect", "third.txt", "--group", "private", "--commit")
-	tree = s.git(repo, "write-tree")
-	for _, args := range [][]string{{"protect", "extra.txt"}, {"add-recipient", key}, {"remove-recipient", key}} {
-		if r := s.run(repo, released, args...); r.code == 0 || !strings.Contains(r.out, ".sops.yaml") {
-			t.Fatalf("expected %s %v to refuse grouped policy: %s", tag, args, r.out)
+	assertEditsRefused := func() {
+		t.Helper()
+		tree := s.git(repo, "write-tree")
+		before := read(t, policy)
+		for _, args := range [][]string{{"protect", "extra.txt"}, {"add-recipient", key}, {"remove-recipient", key}} {
+			if r := s.run(repo, released, args...); r.code == 0 || !strings.Contains(r.out, ".sops.yaml") {
+				t.Fatalf("expected %s %v to refuse the upgraded policy: %s", tag, args, r.out)
+			}
+		}
+		if read(t, policy) != before || s.git(repo, "write-tree") != tree || s.git(repo, "status", "--porcelain") != "" {
+			t.Fatal("released policy commands modified the upgraded repository")
 		}
 	}
-	if s.git(repo, "write-tree") != tree || s.git(repo, "status", "--porcelain") != "" {
-		t.Fatal("released policy commands modified the grouped repository")
-	}
+	assertEditsRefused()
+	s.mustGitSops(repo, "group", "set", "private", owner, "--commit")
+	s.mustGitSops(repo, "protect", "third.txt", "--group", "private", "--commit")
+	assertEditsRefused()
 }

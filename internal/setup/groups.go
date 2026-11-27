@@ -193,7 +193,7 @@ func editAccess(e *Env, o Options, action string) error {
 	}
 	err = pathTransaction(e, func() error {
 		policy := &next
-		// Naming the shared default explicitly still represents a legacy-compatible policy.
+		// Naming the shared default explicitly still uses a single recipient list.
 		if old.Groups == nil && len(next.Groups) == 1 {
 			policy = &config.Managed{Recipients: next.Recipients, RecipientNames: next.RecipientNames}
 		}

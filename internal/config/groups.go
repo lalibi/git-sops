@@ -16,7 +16,8 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-const GroupMarker = "# Managed by git-sops (recipient groups v1)"
+const GroupMarker = "# Managed by git-sops (recipient groups v2)"
+const groupV1Marker = "# Managed by git-sops (recipient groups v1)"
 const DefaultGroup = "default"
 
 var groupName = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)

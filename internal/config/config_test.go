@@ -13,7 +13,7 @@ func TestMigrateRecipientNameComment(t *testing.T) {
 	path := filepath.Join(root, ".sops.yaml")
 	const key = "age1abc"
 	const name = "HAL9000 # recovery"
-	legacy := SopsMarker + "\n# recipient-name: " + key + " " + name + "\nrecipients: &recipients\n  - " + key + "\ncreation_rules: []\n"
+	legacy := sharedV1Marker + "\n# recipient-name: " + key + " " + name + "\nrecipients: &recipients\n  - " + key + "\ncreation_rules: []\n"
 	if err := os.WriteFile(path, []byte(legacy), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestSopsConfigRoundTrip(t *testing.T) {
 	}
 	_, rules, ok := strings.Cut(string(data), "creation_rules:\n")
 	for i, path := range m.ProtectedPaths {
-		label := "# protected-path: " + path + "\n"
+		label := "  # protected-path: " + path + "\n"
 		if !ok || strings.Count(string(data), label) != 1 || !strings.Contains(rules, label+"  - path_regex: '^"+specs[i].RegexPart+"$'") {
 			t.Errorf("expected one label above the creation rule for %q", path)
 		}
