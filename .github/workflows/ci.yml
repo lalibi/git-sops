@@ -17,12 +17,12 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # Build the tagged CLI for the cross-version integration test.
           persist-credentials: false
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
 
@@ -36,7 +36,15 @@ jobs:
 
       - name: Update Git (macOS)
         if: runner.os == 'macOS'
-        run: brew upgrade git || brew install git
+        run: |
+          if brew list --versions git >/dev/null; then
+            outdated=$(brew outdated --quiet --formula git)
+            if [[ -n "$outdated" ]]; then
+              brew upgrade git
+            fi
+          else
+            brew install git
+          fi
 
       - run: git --version
 

@@ -29,6 +29,15 @@ function Get-ReleaseRepository {
     return '{0}/{1}/{2}' -f $Matches.server, $Matches.owner, ($Matches.project -replace '\.git$', '')
 }
 
+function Invoke-ReleaseWait($Title, [scriptblock]$Work) {
+    if ([Console]::IsOutputRedirected -or !$Host.UI.SupportsVirtualTerminal) {
+        Write-Host $Title
+        & $Work
+    } else {
+        Invoke-SpectreCommandWithStatus -Title $Title -Spinner Dots -Color Cyan -ScriptBlock $Work
+    }
+}
+
 function Format-ReleaseState($Item) {
     $state = $Item.conclusion ? $Item.conclusion : $Item.status
     switch ($state) {
@@ -101,7 +110,22 @@ function Watch-ReleaseJobs($Repo, $Run, $Tag) {
                 $previous = $json
             }
             if ($snapshot.status -eq 'completed') { break }
-            Start-Sleep -Seconds 15
+            if (!$Context) {
+                Start-Sleep -Seconds 15
+                continue
+            }
+            # Animate the existing dashboard between polls without querying GitHub per frame.
+            $spinner = [Spectre.Console.Spinner+Known]::Dots
+            $elapsed = [Diagnostics.Stopwatch]::StartNew()
+            $frame = 0
+            do {
+                $glyph = $spinner.Frames[$frame % $spinner.Frames.Count]
+                $status = [Spectre.Console.Markup]::new("[cyan]$glyph[/] Watching workflow…")
+                $Context.UpdateTarget([Spectre.Console.Rows]::new(@($table, $status)))
+                $Context.Refresh()
+                Start-Sleep -Milliseconds $spinner.Interval.TotalMilliseconds
+                $frame++
+            } while ($elapsed.Elapsed.TotalSeconds -lt 15)
         } while ($true)
         if ($snapshot.conclusion -ne 'success') {
             throw "Release workflow for $Tag finished with conclusion '$($snapshot.conclusion)'. See $($Run.url)"
@@ -119,16 +143,17 @@ function Wait-Release($Repo, $Tag, $Commit) {
     $filters = @('--workflow', 'release.yml', '--event', 'push', '--branch', $Tag)
     if ($Commit) { $filters += '--commit', $Commit }
     Write-Host
-    Write-SpectreHost "[grey]Waiting for the release workflow for $Tag...[/]"
-    $deadline = [DateTime]::UtcNow.AddMinutes(3)
-    do {
-        $json = gh run list --repo $Repo @filters --limit 1 --json databaseId,url
-        if ($LASTEXITCODE -ne 0) { throw "Could not look up the release workflow for $Tag. Check gh authentication and repository access." }
-        $run = $json | ConvertFrom-Json | Select-Object -First 1
-        if ($run) { break }
-        Start-Sleep -Seconds 5
-    } while ([DateTime]::UtcNow -lt $deadline)
-    if (!$run) { throw "No release workflow appeared for $Tag. Retry with -WatchTag $Tag." }
+    $run = Invoke-ReleaseWait "Waiting for the release workflow for $Tag…" {
+        $deadline = [DateTime]::UtcNow.AddMinutes(3)
+        do {
+            $json = gh run list --repo $Repo @filters --limit 1 --json databaseId,url
+            if ($LASTEXITCODE -ne 0) { throw "Could not look up the release workflow for $Tag. Check gh authentication and repository access." }
+            $found = $json | ConvertFrom-Json | Select-Object -First 1
+            if ($found) { return $found }
+            Start-Sleep -Seconds 5
+        } while ([DateTime]::UtcNow -lt $deadline)
+        throw "No release workflow appeared for $Tag. Retry with -WatchTag $Tag."
+    }
 
     Write-Host "Release workflow: $($run.url)"
     Watch-ReleaseJobs $Repo $run $Tag
@@ -140,25 +165,27 @@ function Wait-Release($Repo, $Tag, $Commit) {
             $expected += "git-sops_$($Tag.Substring(1))_${os}_$arch.$extension"
         }
     }
-    $deadline = [DateTime]::UtcNow.AddMinutes(2)
-    do {
-        $result = gh release view $Tag --repo $Repo --json tagName,isDraft,url,assets 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            $release = $result | ConvertFrom-Json
-            $uploaded = @($release.assets | Where-Object { $_.state -eq 'uploaded' -and $_.size -gt 0 } | ForEach-Object name)
-            $missing = @($expected | Where-Object { $_ -cnotin $uploaded })
-            if ($release.tagName -ceq $Tag -and !$release.isDraft -and !$missing.Count) {
-                Write-Host
-                Write-Host "Release available: $($release.url)"
-                return
+    Write-Host
+    $url = Invoke-ReleaseWait "Waiting for the $Tag release assets…" {
+        $deadline = [DateTime]::UtcNow.AddMinutes(2)
+        do {
+            $result = gh release view $Tag --repo $Repo --json tagName,isDraft,url,assets 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $release = $result | ConvertFrom-Json
+                $uploaded = @($release.assets | Where-Object { $_.state -eq 'uploaded' -and $_.size -gt 0 } | ForEach-Object name)
+                $missing = @($expected | Where-Object { $_ -cnotin $uploaded })
+                if ($release.tagName -ceq $Tag -and !$release.isDraft -and !$missing.Count) {
+                    return $release.url
+                }
+                $reason = if ($release.isDraft) { 'still a draft' } else { "missing uploads: $($missing -join ', ')" }
+            } else {
+                $reason = $result -join ' '
             }
-            $reason = if ($release.isDraft) { 'still a draft' } else { "missing uploads: $($missing -join ', ')" }
-        } else {
-            $reason = $result -join ' '
-        }
-        Start-Sleep -Seconds 5
-    } while ([DateTime]::UtcNow -lt $deadline)
-    throw "Workflow succeeded, but release $Tag could not be verified ($reason). Retry with -WatchTag $Tag."
+            Start-Sleep -Seconds 5
+        } while ([DateTime]::UtcNow -lt $deadline)
+        throw "Workflow succeeded, but release $Tag could not be verified ($reason). Retry with -WatchTag $Tag."
+    }
+    Write-Host "Release available: $url"
 }
 
 if ($WatchTag) {
