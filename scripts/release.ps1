@@ -29,13 +29,88 @@ function Get-ReleaseRepository {
     return '{0}/{1}/{2}' -f $Matches.server, $Matches.owner, ($Matches.project -replace '\.git$', '')
 }
 
+function Format-ReleaseState($Item) {
+    $state = $Item.conclusion ? $Item.conclusion : $Item.status
+    switch ($state) {
+        'success'     { '[green]✓ Passed[/]' }
+        'failure'     { '[red]✗ Failed[/]' }
+        'in_progress' { '[cyan]Running[/]' }
+        'pending'     { '[grey]Pending[/]' }
+        'queued'      { '[grey]Queued[/]' }
+        'skipped'     { '[grey]Skipped[/]' }
+        'cancelled'   { '[yellow]Cancelled[/]' }
+        default       { Get-SpectreEscapedText ($state -replace '_', ' ') }
+    }
+}
+
+function Format-ReleaseJobs($Snapshot) {
+    $columns = @{ ubuntu = 'Linux'; windows = 'Windows'; macos = 'macOS' }
+    $unreported = $Snapshot.status -eq 'completed' ? '—' : 'Waiting'
+    $summary = [ordered]@{ Step = 'Job'; Linux = $unreported; Windows = $unreported; macOS = $unreported }
+    $steps = @{}
+    $title = @("Workflow: $(Format-ReleaseState $Snapshot)")
+    foreach ($job in $Snapshot.jobs) {
+        if ($job.name -notmatch '\((ubuntu|windows|macos)-latest\)$') {
+            $title += "$(Get-SpectreEscapedText $job.name): $(Format-ReleaseState $job)"
+            continue
+        }
+        $column = $columns[$Matches[1]]
+        $summary[$column] = Format-ReleaseState $job
+        foreach ($step in $job.steps) {
+            $key = "$($step.number):$($step.name)"
+            if (!$steps.ContainsKey($key)) {
+                $label = $step.name -replace '@[0-9a-f]{40}\b', '' -replace '^(Post )?Run ', '$1'
+                $steps[$key] = [pscustomobject]@{
+                    Number = $step.number; Step = Get-SpectreEscapedText $label
+                    Linux = '—'; Windows = '—'; macOS = '—'
+                }
+            }
+            $steps[$key].$column = Format-ReleaseState $step
+        }
+    }
+    $rows = @([pscustomobject]$summary) + @($steps.Values | Sort-Object Number, Step)
+    $rows | Format-SpectreTable -Property Step,Linux,Windows,macOS -Title ($title -join '   ') -AllowMarkup -Border Rounded -Color Grey -HeaderColor Cyan
+}
+
+function Watch-ReleaseJobs($Repo, $Run, $Tag) {
+    $poll = {
+        param($Context)
+        $previous = ''
+        do {
+            $json = (gh run view $Run.databaseId --repo $Repo --json status,conclusion,jobs) -join "`n"
+            if ($LASTEXITCODE -ne 0) { throw "Could not read workflow jobs for $Tag. See $($Run.url)" }
+            $snapshot = $json | ConvertFrom-Json
+            if ($json -cne $previous) {
+                $table = Format-ReleaseJobs $snapshot
+                if ($Context) {
+                    $Context.UpdateTarget($table)
+                    $Context.Refresh()
+                } else {
+                    $table | Out-SpectreHost
+                }
+                $previous = $json
+            }
+            if ($snapshot.status -eq 'completed') { break }
+            Start-Sleep -Seconds 15
+        } while ($true)
+        if ($snapshot.conclusion -ne 'success') {
+            throw "Release workflow for $Tag finished with conclusion '$($snapshot.conclusion)'. See $($Run.url)"
+        }
+    }
+    if ([Console]::IsOutputRedirected -or !$Host.UI.SupportsVirtualTerminal) {
+        & $poll
+    } else {
+        Invoke-SpectreLive -Data ([Spectre.Console.Markup]::new('Loading workflow jobs…')) -ScriptBlock $poll
+    }
+}
+
 function Wait-Release($Repo, $Tag, $Commit) {
     $filters = @('--workflow', 'release.yml', '--event', 'push', '--branch', $Tag)
     if ($Commit) { $filters += '--commit', $Commit }
     Write-SpectreHost "[grey]Waiting for the release workflow for $Tag...[/]"
     $deadline = [DateTime]::UtcNow.AddMinutes(3)
     do {
-        $json = gh run list --repo $Repo @filters --limit 1 --json databaseId,status,conclusion,url
+        $json = gh run list --repo $Repo @filters --limit 1 --json databaseId,url
         if ($LASTEXITCODE -ne 0) { throw "Could not look up the release workflow for $Tag. Check gh authentication and repository access." }
         $run = $json | ConvertFrom-Json | Select-Object -First 1
         if ($run) { break }
@@ -44,12 +119,7 @@ function Wait-Release($Repo, $Tag, $Commit) {
     if (!$run) { throw "No release workflow appeared for $Tag. Retry with -WatchTag $Tag." }
 
     Write-Host "Release workflow: $($run.url)"
-    if ($run.status -ne 'completed') {
-        gh run watch $run.databaseId --repo $Repo --interval 15 --exit-status
-        if ($LASTEXITCODE -ne 0) { throw "Workflow watch failed for $Tag. See $($run.url)" }
-    } elseif ($run.conclusion -ne 'success') {
-        throw "Release workflow for $Tag finished with conclusion '$($run.conclusion)'. See $($run.url)"
-    }
+    Watch-ReleaseJobs $Repo $run $Tag
 
     $expected = @('checksums.txt')
     foreach ($os in 'windows', 'darwin', 'linux') {

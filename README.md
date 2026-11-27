@@ -77,7 +77,7 @@ Commit the changes you want to release on `main`, then publish.
 ./scripts/release.ps1 -Publish
 ```
 
-Publishing fetches tags from `origin`, recalculates against its published tags, and pushes the reviewed commit and an annotated version tag together. The script uses the GitHub CLI (`gh`) to follow that tag's release workflow. After it succeeds, the script verifies that all six platform archives and `checksums.txt` are available and prints the release URL. Sign in with `gh auth login` before publishing.
+Publishing fetches tags from `origin`, recalculates against its published tags, and pushes the reviewed commit and an annotated version tag together. The script uses the GitHub CLI (`gh`) to show each test step's progress side by side for Linux, Windows, and macOS. After the workflow succeeds, the script verifies that all six platform archives and `checksums.txt` are available and prints the release URL. Sign in with `gh auth login` before publishing.
 
 To check an existing release or resume an interrupted watch, run `./scripts/release.ps1 -WatchTag v0.4.0` with the tag you want to follow. To preview the archives locally, run `goreleaser release --snapshot --clean`.
 
