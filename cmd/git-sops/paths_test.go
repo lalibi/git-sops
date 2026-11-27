@@ -8,6 +8,43 @@ import (
 	"filippo.io/age"
 )
 
+func TestProtectRecursiveEnvGlob(t *testing.T) {
+	s := newSandbox(t)
+	repo := protectedRepo(t, s)
+	s.git(repo, "commit", "-m", "initialize policy")
+	const secret = "TOKEN=sensitive-value\n"
+	write(t, filepath.Join(repo, ".env"), secret)
+	write(t, filepath.Join(repo, ".gitignore"), "ignored.env\n")
+	s.git(repo, "add", ".env", ".gitignore")
+	s.git(repo, "commit", "-m", "track root env")
+	write(t, filepath.Join(repo, "services/api/prod.env"), secret)
+	write(t, filepath.Join(repo, "ignored.env"), secret)
+	write(t, filepath.Join(repo, "prod.env.example"), "TOKEN=example\n")
+	s.mustGitSops(repo, "protect", "**/*.env", "future/**/*.key")
+	if policy := read(t, filepath.Join(repo, ".sops.yaml")); !strings.Contains(policy, "# protected-path: **/*.env\n") {
+		t.Fatal("missing persistent glob rule")
+	}
+	s.git(repo, "commit", "-m", "protect env and future key files")
+	for _, file := range []string{"worker.env", "new/nested/.env", "future/service.key"} {
+		write(t, filepath.Join(repo, file), secret)
+		s.git(repo, "add", "--", file)
+	}
+	for _, file := range []string{".env", "services/api/prod.env", "worker.env", "new/nested/.env", "future/service.key"} {
+		if blob := s.git(repo, "cat-file", "blob", ":"+file); !strings.Contains(blob, "sops") || strings.Contains(blob, "sensitive-value") {
+			t.Fatalf("expected ciphertext for %s", file)
+		}
+	}
+	if got := s.git(repo, "ls-files", "--", "ignored.env", "prod.env.example"); got != "" {
+		t.Fatalf("unexpectedly staged %s", got)
+	}
+	s.mustGitSops(repo, "verify")
+	s.git(repo, "commit", "-m", "add future matches")
+	s.mustGitSops(repo, "unprotect", "**/*.env")
+	if got := s.git(repo, "cat-file", "blob", ":new/nested/.env"); strings.TrimSpace(got) != strings.TrimSpace(secret) {
+		t.Fatal("removing the glob did not restore plaintext")
+	}
+}
+
 func TestProtectUpgradesCombinedRule(t *testing.T) {
 	s := newSandbox(t)
 	repo := filepath.Join(t.TempDir(), "repo")
@@ -174,8 +211,10 @@ func TestProtectValidatesNewFileBeforeGitWritesItsBlob(t *testing.T) {
 	write(t, filepath.Join(repo, "example", ".gitattributes"), "sample.txt -filter\n")
 	write(t, filepath.Join(repo, "example", "sample.txt"), "untracked preflight fixture\n")
 	hash := strings.TrimSpace(s.git(repo, "hash-object", "--no-filters", "example/sample.txt"))
-	if r := s.gitSops(repo, "protect", "example/sample.txt"); r.code == 0 || !strings.Contains(r.out, "attributes do not protect") {
-		t.Fatalf("expected working attribute error: %s", r.out)
+	for _, selector := range []string{"example/sample.txt", "**/*.txt"} {
+		if r := s.gitSops(repo, "protect", selector); r.code == 0 || !strings.Contains(r.out, "attributes do not protect") {
+			t.Fatalf("expected working attribute error for %s: %s", selector, r.out)
+		}
 	}
 	if r := s.run(repo, "git", "cat-file", "-e", hash); r.code == 0 {
 		t.Fatal("rejected path was written to the object database")

@@ -99,6 +99,12 @@ func commitChanges(e *Env, o Options, command string, specs []config.Spec, recip
 	message := o.Message
 	if message == "" {
 		message = generatedCommitMessage(command, specs, recipients)
+		if command == "add-recipient" && o.RecipientName != "" {
+			if len(specs) == 0 {
+				message = fmt.Sprintf("chore(git-sops): 🔑 Update named encryption recipient\n\nPublic key: %s\n", o.Recipients[0])
+			}
+			message += "\nRecipient name: " + o.RecipientName + "\n"
+		}
 		if o.Everywhere {
 			message += "\nRecipient scope: every group\n"
 		} else if o.Group != "" {

@@ -129,7 +129,7 @@ func Unprotect(o Options) error {
 			covered := false
 			for _, s := range old {
 				if config.Matches(s, n) {
-					ui.Warnf("Skipping %q: it is inside protected folder %q and remains protected. Remove the complete folder rule to unprotect it.", p, s.RelativePath+"/")
+					ui.Warnf("Skipping %q: it remains protected by rule %q. Remove the complete rule to unprotect it.", p, s.RelativePath)
 					covered = true
 					break
 				}
@@ -147,8 +147,8 @@ func Unprotect(o Options) error {
 			continue
 		}
 		for _, r := range old {
-			if !remove[r.RelativePath] && config.Matches(r, s.RelativePath) {
-				ui.Warnf("Skipping %q: it remains protected by folder %q. Remove the complete folder rule to unprotect it.", s.RelativePath, r.RelativePath+"/")
+			if !remove[r.RelativePath] && (r.IsDirectory || !s.IsGlob() && !s.IsDirectory) && config.Matches(r, s.RelativePath) {
+				ui.Warnf("Skipping %q: it remains protected by rule %q. Remove the complete rule to unprotect it.", s.RelativePath, r.RelativePath)
 				delete(remove, s.RelativePath)
 				break
 			}

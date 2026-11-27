@@ -144,7 +144,7 @@ func repository(r *report, g *gitx.Git, sopsExe, root string, id *agekey.Identit
 		} else {
 			n := 0
 			for _, rule := range managed.ProtectedPaths {
-				if slices.Contains(managed.KeysFor(rule), id.Recipient) {
+				if slices.Contains(managed.KeysForRule(rule), id.Recipient) {
 					n++
 				}
 			}

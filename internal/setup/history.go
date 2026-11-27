@@ -532,17 +532,18 @@ func relativeSpecs(specs []config.Spec, prefix string) []config.Spec {
 	}
 	var out []config.Spec
 	for _, s := range specs {
+		if base, file, recursive := strings.Cut(s.RelativePath, "**/"); recursive && strings.HasPrefix(prefix, base) {
+			s.AttributePattern = config.AttributePattern("**/"+file, false)
+			out = append(out, s)
+			continue
+		}
 		if s.IsDirectory && strings.HasPrefix(prefix, s.RelativePath+"/") {
 			s.AttributePattern = "/**"
 			out = append(out, s)
 		} else if strings.HasPrefix(s.RelativePath, prefix) {
 			rel := strings.TrimPrefix(s.RelativePath, prefix)
-			if s.IsDirectory {
-				rel += "/"
-			}
-			built, _ := config.BuildSpecs("", []string{rel})
-			if len(built) == 1 {
-				s.AttributePattern = built[0].AttributePattern
+			if rel != "" {
+				s.AttributePattern = config.AttributePattern(rel, s.IsDirectory)
 				out = append(out, s)
 			}
 		}

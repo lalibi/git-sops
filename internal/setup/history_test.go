@@ -54,3 +54,19 @@ func TestRelativeSpecsKeepsDirectoryPatternsQuoted(t *testing.T) {
 		t.Fatalf("directory coverage lost: %+v", inside)
 	}
 }
+
+func TestRelativeSpecsRecursiveGlob(t *testing.T) {
+	specs, err := config.BuildSpecs(t.TempDir(), []string{"src/config/**/*.env"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for dir, want := range map[string]string{"src/": "/config/**/*.env", "src/config/": "/**/*.env", "src/config/child/": "/**/*.env", "src/other/": ""} {
+		got := relativeSpecs(specs, dir)
+		if want == "" && len(got) == 0 {
+			continue
+		}
+		if len(got) != 1 || got[0].AttributePattern != want {
+			t.Errorf("relative to %s: %+v, want %q", dir, got, want)
+		}
+	}
+}

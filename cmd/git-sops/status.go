@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -20,10 +21,10 @@ import (
 func newStatusCommand(o *setup.Options) *cobra.Command {
 	var onlyProtected, onlyUnprotected bool
 	cmd := &cobra.Command{
-		Use: "status", Short: "List tracked files, protection rules and encryption in the index",
-		Long: "List tracked files using staged attributes and index blobs. Working-tree plaintext is normal; repository history is not inspected. No private key is required.",
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Use: "status [path or glob]...", Short: "List tracked files, protection rules and encryption in the index",
+		Long:    "Inspect staged attributes and index blobs without a private key. Optional repository-root-relative files, directories and quoted globs limit the check to matching tracked paths.",
+		Example: "  git-sops status secrets/ README.md\n  git-sops status --protected '**/*.env'",
+		RunE: func(cmd *cobra.Command, paths []string) error {
 			g, err := gitx.New(o.RepoPath)
 			if err != nil {
 				return err
@@ -33,7 +34,15 @@ func newStatusCommand(o *setup.Options) *cobra.Command {
 				return err
 			}
 			g.Dir = root
-			entries, err := g.ZList("ls-files", "--stage", "-z")
+			listArgs := []string{"ls-files", "--stage", "-z"}
+			if len(paths) > 0 {
+				listArgs = append([]string{"--glob-pathspecs"}, listArgs...)
+				listArgs = append(listArgs, "--")
+				for _, p := range paths {
+					listArgs = append(listArgs, filepath.ToSlash(p))
+				}
+			}
+			entries, err := g.ZList(listArgs...)
 			if err != nil {
 				return err
 			}
@@ -57,7 +66,11 @@ func newStatusCommand(o *setup.Options) *cobra.Command {
 				submodules[path] = fields[0] == "160000"
 			}
 			if len(files) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No tracked files in the index.")
+				if len(paths) > 0 {
+					fmt.Fprintln(cmd.OutOrStdout(), "No tracked files match the selected paths.")
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(), "No tracked files in the index.")
+				}
 				return nil
 			}
 			attrs, err := g.FilterAttributes(files, true)
@@ -113,7 +126,7 @@ func newStatusCommand(o *setup.Options) *cobra.Command {
 				}
 				rows = append(rows, statusRow{label, protection, state})
 			}
-			if err := renderStatus(cmd.OutOrStdout(), root, rows, len(files), protectedCount, issues); err != nil {
+			if err := renderStatus(cmd.OutOrStdout(), root, rows, len(files), protectedCount, issues, len(paths) > 0); err != nil {
 				return err
 			}
 			if issues > 0 {
@@ -130,7 +143,7 @@ func newStatusCommand(o *setup.Options) *cobra.Command {
 
 type statusRow struct{ path, protection, state string }
 
-func renderStatus(out io.Writer, root string, rows []statusRow, tracked, protected, issues int) error {
+func renderStatus(out io.Writer, root string, rows []statusRow, tracked, protected, issues int, scoped bool) error {
 	// Format before coloring so ANSI escapes never affect column alignment.
 	var table bytes.Buffer
 	w := tabwriter.NewWriter(&table, 0, 4, 3, ' ', 0)
@@ -153,6 +166,9 @@ func renderStatus(out io.Writer, root string, rows []statusRow, tracked, protect
 	var report bytes.Buffer
 	fmt.Fprintln(&report, style("git-sops status", "6", true))
 	fmt.Fprintln(&report, style(root, "8", false))
+	if scoped {
+		fmt.Fprintln(&report, "Checking selected paths only.")
+	}
 	fmt.Fprintf(&report, "\n%d tracked  |  %d protected  |  %d unprotected  |  %d issues\n\n", tracked, protected, tracked-protected, issues)
 	lines := strings.Split(strings.TrimSuffix(table.String(), "\n"), "\n")
 	for i, line := range lines {
@@ -173,10 +189,16 @@ func renderStatus(out io.Writer, root string, rows []statusRow, tracked, protect
 	if len(rows) != tracked {
 		fmt.Fprintf(&report, "\nShowing %d of %d tracked files; issue count includes hidden files.\n", len(rows), tracked)
 	}
-	if protected == 0 && issues == 0 {
-		fmt.Fprintln(&report, style("\nNo protected entries in the index.", "8", false))
-	} else if issues == 0 {
-		fmt.Fprintln(&report, style("\nAll protected index entries are encrypted.", "2", false))
+	if issues == 0 {
+		scope := "the index"
+		if scoped {
+			scope = "the selected paths"
+		}
+		if protected == 0 {
+			fmt.Fprintln(&report, style("\nNo protected entries in "+scope+".", "8", false))
+		} else {
+			fmt.Fprintln(&report, style("\nAll protected entries in "+scope+" are encrypted.", "2", false))
+		}
 	}
 	fmt.Fprintln(&report, style("\nIndex only; protected working-tree files normally contain plaintext.", "8", false))
 	_, err := out.Write(report.Bytes())

@@ -95,7 +95,7 @@ func MigrateGitCrypt(o Options) error {
 		return err
 	}
 	for i, spec := range discovered {
-		if spec.RelativePath != uncovered[i] || spec.IsDirectory {
+		if spec.RelativePath != uncovered[i] || spec.IsDirectory || spec.IsGlob() {
 			return fmt.Errorf("cannot represent git-crypt file %q as an exact protected path", uncovered[i])
 		}
 	}

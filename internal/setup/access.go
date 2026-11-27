@@ -75,11 +75,14 @@ func ShowAccess(o Options, recipient ...string) error {
 		}
 	}
 	if key == "" {
-		ui.Section("Age recipient / staged files / policy groups")
+		ui.Section("Age recipient / staged files / policy groups / name")
 		for _, k := range slices.Sorted(maps.Keys(counts)) {
 			label := strings.Join(groups[k], ", ")
 			if label == "" {
 				label = "(index only)"
+			}
+			if m != nil && m.RecipientNames[k] != "" {
+				label += "  " + m.RecipientNames[k]
 			}
 			ui.Printf("  %s  %d  %s", k, counts[k], label)
 		}
@@ -87,6 +90,9 @@ func ShowAccess(o Options, recipient ...string) error {
 		return nil
 	}
 	if m != nil {
+		if name := m.RecipientNames[key]; name != "" {
+			ui.Infof("Recipient %s: %s", key, name)
+		}
 		ui.Section("Groups")
 		for _, group := range groups[key] {
 			ui.Printf("  %s", group)

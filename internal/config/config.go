@@ -8,9 +8,11 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/lalibi/git-sops/internal/worktree"
 )
@@ -26,7 +28,6 @@ var (
 	recipientPattern = regexp.MustCompile(`^age1[0-9a-z]+$`)
 	recipientLine    = regexp.MustCompile(`^\s*-\s+(age1[0-9a-z]+)\s*$`)
 	protectedLine    = regexp.MustCompile(`^#\s*protected-path:\s*(.+)$`)
-	globChars        = regexp.MustCompile(`[*?\[]`)
 	dotDot           = regexp.MustCompile(`(^|/)\.\.($|/)`)
 )
 
@@ -49,27 +50,56 @@ func NormalizePath(p string) (string, error) {
 	if n == "" {
 		return "", fmt.Errorf("invalid protected path %q", p)
 	}
-	if dotDot.MatchString(n) || globChars.MatchString(n) {
-		return "", fmt.Errorf("protected paths accept exact files or directories only, not '..' or glob patterns: %q", p)
+	if dotDot.MatchString(n) || strings.ContainsAny(n, "?[") {
+		return "", fmt.Errorf("protected paths cannot contain '..', '?' or '[': %q", p)
 	}
 	n = path.Clean(n)
 	if n == "." {
 		return "", errors.New("the repository root cannot be protected; select its files or subdirectories")
 	}
+	if strings.Contains(n, "*") {
+		dir, base := path.Split(n)
+		prefix, recursive := strings.CutSuffix(dir, "**/")
+		if strings.Contains(prefix, "*") || (recursive && prefix != "" && !strings.HasSuffix(prefix, "/")) ||
+			strings.Contains(base, "**") || strings.HasSuffix(p, "/") || strings.HasSuffix(p, `\`) {
+			return "", fmt.Errorf("use '*' in a filename and an optional '**/' directory before it: %q", p)
+		}
+		if match, _ := path.Match(strings.ToLower(base), ".gitattributes"); match || globMatches(strings.ToLower(n), ".sops.yaml") {
+			return "", fmt.Errorf("encryption configuration must remain plaintext: %q", p)
+		}
+	}
 	return n, nil
+}
+
+// A file glob has a literal directory prefix, optionally ending in **/.
+func globMatches(pattern, file string) bool {
+	dir, base := path.Split(pattern)
+	prefix, recursive := strings.CutSuffix(dir, "**/")
+	rest, ok := strings.CutPrefix(file, prefix)
+	if !ok || (!recursive && strings.Contains(rest, "/")) || rest == "" || strings.HasSuffix(rest, "/") {
+		return false
+	}
+	matched, _ := path.Match(base, path.Base(rest))
+	return matched
 }
 
 func pathToRegex(path string, isDir bool) string {
 	segments := strings.Split(path, "/")
+	var pattern strings.Builder
 	for i, s := range segments {
-		segments[i] = regexp.QuoteMeta(s)
+		if s == "**" {
+			pattern.WriteString(`([^\\/]+[\\/])*`)
+			continue
+		}
+		pattern.WriteString(strings.ReplaceAll(regexp.QuoteMeta(s), `\*`, `[^\\/]*`))
+		if i < len(segments)-1 {
+			pattern.WriteString(`[\\/]`)
+		}
 	}
-
-	joined := strings.Join(segments, `[\\/]`)
 	if isDir {
-		return joined + `[\\/].*`
+		pattern.WriteString(`[\\/].*`)
 	}
-	return joined
+	return pattern.String()
 }
 
 func BuildSpecs(root string, paths []string) ([]Spec, error) {
@@ -90,23 +120,16 @@ func BuildSpecs(root string, paths []string) ([]Spec, error) {
 		}
 
 		isDir := strings.HasSuffix(raw, "/") || strings.HasSuffix(raw, `\`)
-		if st, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err == nil && st.IsDir() {
-			isDir = true
-		}
-
-		pattern := "/" + rel
-		if isDir {
-			pattern = "/" + rel + "/**"
-		}
-		// Git attributes require C-style quoting for spaces and special characters.
-		if strings.ContainsAny(pattern, " \t\"\\") {
-			pattern = strconv.Quote(pattern)
+		if !strings.Contains(rel, "*") {
+			if st, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err == nil && st.IsDir() {
+				isDir = true
+			}
 		}
 
 		specs = append(specs, Spec{
 			RelativePath:     rel,
 			IsDirectory:      isDir,
-			AttributePattern: pattern,
+			AttributePattern: AttributePattern(rel, isDir),
 			RegexPart:        pathToRegex(rel, isDir),
 		})
 	}
@@ -114,9 +137,25 @@ func BuildSpecs(root string, paths []string) ([]Spec, error) {
 	return specs, nil
 }
 
+func AttributePattern(rel string, isDir bool) string {
+	pattern := "/" + rel
+	if isDir {
+		pattern += "/**"
+	}
+	if strings.ContainsAny(pattern, " \t\"\\") {
+		return strconv.Quote(pattern)
+	}
+	return pattern
+}
+
 func Matches(s Spec, path string) bool {
+	if s.IsGlob() {
+		return globMatches(s.RelativePath, path)
+	}
 	return path == s.RelativePath && !s.IsDirectory || s.IsDirectory && strings.HasPrefix(path, s.RelativePath+"/")
 }
+
+func (s Spec) IsGlob() bool { return strings.Contains(s.RelativePath, "*") }
 
 func Protected(specs []Spec, path string) bool {
 	for _, s := range specs {
@@ -219,8 +258,23 @@ func RenderAttributes(data []byte, specs []Spec, migrateGitCrypt bool) ([]byte, 
 type Managed struct {
 	ProtectedPaths []string
 	Recipients     []string
+	RecipientNames map[string]string
 	Groups         map[string][]string
 	Assignments    map[string]string
+}
+
+func ValidateRecipientName(name string) error {
+	if strings.TrimSpace(name) == "" || strings.IndexFunc(name, func(r rune) bool { return !unicode.IsPrint(r) }) != -1 {
+		return errors.New("recipient name must be nonempty, printable text on one line")
+	}
+	return nil
+}
+
+func (m *Managed) SetRecipientName(key, name string) {
+	if m.RecipientNames == nil {
+		m.RecipientNames = map[string]string{}
+	}
+	m.RecipientNames[key] = name
 }
 
 // ReadManaged returns the data of a generated .sops.yaml, or nil when the file is absent or hand-written.
@@ -238,20 +292,35 @@ func ReadManaged(path string) (*Managed, error) {
 // ParseManaged reads git-sops metadata only from policies bearing a generated header.
 func ParseManaged(data []byte) (*Managed, error) {
 	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-	if lines[0] == GroupMarker {
-		return parseGroupPolicy(data, lines)
-	}
-	if lines[0] != SopsMarker && lines[0] != LegacySopsMarker {
+	m := &Managed{}
+	switch lines[0] {
+	case GroupMarker:
+		var err error
+		m, err = parseGroupPolicy(data, lines)
+		if err != nil {
+			return nil, err
+		}
+	case SopsMarker, LegacySopsMarker:
+		for _, line := range lines {
+			if g := protectedLine.FindStringSubmatch(line); g != nil {
+				m.ProtectedPaths = append(m.ProtectedPaths, strings.TrimSpace(g[1]))
+			} else if g := recipientLine.FindStringSubmatch(line); g != nil {
+				m.Recipients = append(m.Recipients, g[1])
+			}
+		}
+	default:
 		return nil, nil
 	}
-
-	m := &Managed{}
 	for _, line := range lines {
-		if g := protectedLine.FindStringSubmatch(line); g != nil {
-			m.ProtectedPaths = append(m.ProtectedPaths, strings.TrimSpace(g[1]))
-		} else if g := recipientLine.FindStringSubmatch(line); g != nil {
-			m.Recipients = append(m.Recipients, g[1])
+		value, ok := strings.CutPrefix(line, "# recipient-name: ")
+		if !ok {
+			continue
 		}
+		key, name, ok := strings.Cut(value, " ")
+		if !ok || !IsRecipient(key) || ValidateRecipientName(name) != nil || m.RecipientNames[key] != "" {
+			return nil, errors.New("invalid or duplicate recipient-name comment")
+		}
+		m.SetRecipientName(key, strings.TrimSpace(name))
 	}
 	return m, nil
 }
@@ -263,6 +332,7 @@ func WriteSopsConfig(root string, specs []Spec, recipients []string, force bool,
 
 func WriteManagedConfig(root string, specs []Spec, m *Managed, force bool, warnf func(string, ...any)) error {
 	path := filepath.Join(root, ".sops.yaml")
+	names := m.RecipientNames
 
 	if _, err := os.Lstat(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -274,6 +344,9 @@ func WriteManagedConfig(root string, specs []Spec, m *Managed, force bool, warnf
 
 		if managed != nil && managed.Groups != nil && m.Groups == nil {
 			return errors.New("cannot replace a recipient group policy with a repository-wide recipient list")
+		}
+		if managed != nil && names == nil {
+			names = managed.RecipientNames
 		}
 		if managed == nil {
 			if !force {
@@ -302,6 +375,19 @@ func WriteManagedConfig(root string, specs []Spec, m *Managed, force bool, warnf
 		specs = orderedSpecs(specs)
 	}
 	lines := []string{marker}
+	// Keep names separate from the bare age entries read by older versions.
+	keys := slices.Clone(m.Recipients)
+	for _, members := range m.Groups {
+		keys = append(keys, members...)
+	}
+	for _, key := range UniqueRecipients(keys) {
+		if name, ok := names[key]; ok {
+			if err := ValidateRecipientName(name); err != nil {
+				return err
+			}
+			lines = append(lines, "# recipient-name: "+key+" "+name)
+		}
+	}
 	for _, s := range specs {
 		comment := s.RelativePath
 		if s.IsDirectory {

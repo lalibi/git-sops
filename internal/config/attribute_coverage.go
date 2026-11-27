@@ -50,6 +50,17 @@ func attributeScope(pattern, target string, directory bool) (possible, covers bo
 	if strings.ContainsAny(pattern, `"\[]?!`) || strings.Contains(pattern, "//") {
 		return true, false
 	}
+	if strings.Contains(target, "*") {
+		// Overlapping globs need an explicit rule unless their scopes agree.
+		// Incompatible literal filename suffixes prove the scopes disjoint.
+		suffix := func(p string) string {
+			base := strings.ToLower(path.Base(p))
+			return base[strings.LastIndexByte(base, '*')+1:]
+		}
+		a, b := suffix(pattern), suffix(target)
+		return strings.HasSuffix(a, b) || strings.HasSuffix(b, a),
+			pattern == "/"+target || (strings.Contains(target, "/") && pattern == target)
+	}
 	anchored := strings.HasPrefix(pattern, "/")
 	pattern = strings.TrimPrefix(pattern, "/")
 	if rest, ok := strings.CutPrefix(pattern, "**/"); ok {

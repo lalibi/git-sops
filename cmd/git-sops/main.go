@@ -113,7 +113,7 @@ func addCommitFlags(cmd *cobra.Command, o *setup.Options) {
 
 func newPathCommand(base *setup.Options, remove bool) *cobra.Command {
 	var paths []string
-	name, short := "protect", "Add files or directories to the existing protected path set"
+	name, short := "protect", "Add files, directories or filename patterns to the existing protected path set"
 	if remove {
 		name, short = "unprotect", "Remove complete protection rules and stage current contents as plaintext"
 	}
@@ -176,6 +176,7 @@ func newAddRecipientCommand(o *setup.Options) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "age public recipient (repeatable)")
+	cmd.Flags().StringVar(&o.RecipientName, "name", "", "display name for one recipient, saved in .sops.yaml")
 	cmd.Flags().StringVar(&o.Group, "group", "", "recipient group (defaults to default)")
 	cmd.Flags().BoolVar(&o.DryRun, "dry-run", false, "show affected rules and files without applying")
 	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage .sops.yaml")

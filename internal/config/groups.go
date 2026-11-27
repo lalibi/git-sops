@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"path"
 	"regexp"
 	"slices"
 	"sort"
@@ -44,15 +45,44 @@ func (m *Managed) GroupForRule(path string) string {
 	return DefaultGroup
 }
 
-// RuleFor returns the most specific configured file or directory covering path.
+// Use the same precedence as the generated SOPS policy, including its stable
+// declaration order for equally specific patterns.
 func (m *Managed) RuleFor(path string) string {
 	var best string
 	for _, rule := range m.ProtectedPaths {
-		if rule == path || (strings.HasSuffix(rule, "/") && strings.HasPrefix(path, rule) && len(rule) > len(best)) {
+		if rule == path && !strings.Contains(rule, "*") {
+			return rule
+		}
+		match := strings.HasSuffix(rule, "/") && strings.HasPrefix(path, rule)
+		if strings.Contains(rule, "*") {
+			match = globMatches(rule, path)
+		}
+		if match && (best == "" || rulePrecedes(rule, best)) {
 			best = rule
 		}
 	}
 	return best
+}
+
+func rulePrecedes(a, b string) bool {
+	aGlob, bGlob := strings.Contains(a, "*"), strings.Contains(b, "*")
+	if aGlob != bGlob {
+		return !aGlob
+	}
+	if aGlob {
+		dirA, nameA := path.Split(a)
+		dirB, nameB := path.Split(b)
+		prefixA, recursiveA := strings.CutSuffix(dirA, "**/")
+		prefixB, recursiveB := strings.CutSuffix(dirB, "**/")
+		if len(prefixA) != len(prefixB) {
+			return len(prefixA) > len(prefixB)
+		}
+		if recursiveA != recursiveB {
+			return !recursiveA
+		}
+		return len(nameA)-strings.Count(nameA, "*") > len(nameB)-strings.Count(nameB, "*")
+	}
+	return len(strings.TrimSuffix(a, "/")) > len(strings.TrimSuffix(b, "/"))
 }
 
 func (m *Managed) KeysFor(path string) []string {
@@ -60,6 +90,10 @@ func (m *Managed) KeysFor(path string) []string {
 	if rule == "" {
 		return nil
 	}
+	return m.KeysForRule(rule)
+}
+
+func (m *Managed) KeysForRule(rule string) []string {
 	if m.Groups == nil {
 		return m.Recipients
 	}
@@ -69,7 +103,7 @@ func (m *Managed) KeysFor(path string) []string {
 // SOPS selects the first match. Children must precede their enclosing directories.
 func orderedSpecs(in []Spec) []Spec {
 	out := slices.Clone(in)
-	sort.SliceStable(out, func(i, j int) bool { return len(out[i].RelativePath) > len(out[j].RelativePath) })
+	sort.SliceStable(out, func(i, j int) bool { return rulePrecedes(out[i].RelativePath, out[j].RelativePath) })
 	return out
 }
 
@@ -125,8 +159,15 @@ func parseGroupPolicy(data []byte, lines []string) (*Managed, error) {
 		if !ok || rule.Age.Kind != yaml.AliasNode || m.Groups[group] == nil || rule.Age.Alias.Line != doc.Groups[group].Line {
 			return nil, fmt.Errorf("invalid protected path or group in rule %q", rule.Regex)
 		}
-		if parent := m.RuleFor(strings.TrimSuffix(path, "/")); parent != "" {
-			return nil, fmt.Errorf("place %q before overlapping rule %q", path, parent)
+		for _, prior := range m.ProtectedPaths {
+			if strings.Contains(prior, "*") {
+				if rulePrecedes(path, prior) {
+					return nil, fmt.Errorf("place %q before pattern %q", path, prior)
+				}
+			} else if strings.TrimSuffix(prior, "/") == strings.TrimSuffix(path, "/") ||
+				(!strings.Contains(path, "*") && strings.HasSuffix(prior, "/") && strings.HasPrefix(path, prior)) {
+				return nil, fmt.Errorf("place %q before overlapping rule %q", path, prior)
+			}
 		}
 		m.ProtectedPaths = append(m.ProtectedPaths, path)
 		m.Assignments[strings.TrimSuffix(path, "/")] = group

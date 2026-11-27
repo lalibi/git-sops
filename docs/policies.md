@@ -2,7 +2,11 @@
 
 ## Choosing protected paths
 
-Pass exact repository-relative files or directories to `git-sops protect`. A directory rule covers its descendants, including files added later. Git attributes select the filter and the SOPS creation rules select the age recipients. Keep the generated configuration and working files that git-sops updates in regular files under the checkout. Setup rejects symlinks and directory junctions when writing these files.
+Pass repository-relative files, directories or quoted filename patterns to `git-sops protect`. A directory rule covers its descendants, including files added later. In a filename, `*` matches zero or more characters. Put `**/` immediately before the filename to match at any depth under a fixed directory. For example, `git-sops protect 'services/**/*.env'` covers both `services/.env` and `services/api/prod.env`.
+
+Git attributes select the filter and the SOPS creation rules select the age recipients. With recipient groups, exact file and directory rules take precedence over wildcard rules. Among matching patterns, the deepest fixed directory wins. Within that directory a filename pattern takes precedence over a recursive pattern, so `'*.env'` can assign a different group at the root than `'**/*.env'`. Further ties favor more literal filename characters, then policy order.
+
+Keep the generated configuration and working files that git-sops updates in regular files under the checkout. Setup rejects symlinks and directory junctions when writing these files.
 
 ## `.gitattributes`: deciding what Git encrypts
 

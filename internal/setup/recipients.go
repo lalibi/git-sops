@@ -36,6 +36,12 @@ func AddRecipient(o Options) error {
 			return err
 		}
 		o.Recipients = []string{strings.TrimSpace(answer)}
+		if o.RecipientName == "" {
+			o.RecipientName, err = ui.Input("Collaborator name (optional)", "Shown by git-sops access. Press Enter to skip.", "Name or label", "", nil)
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	if len(o.Recipients) == 0 {
@@ -43,6 +49,15 @@ func AddRecipient(o Options) error {
 	}
 	if err := validateRecipients(o.Recipients); err != nil {
 		return err
+	}
+	if o.RecipientName != "" {
+		if len(o.Recipients) != 1 {
+			return errors.New("--name applies to one recipient at a time")
+		}
+		if err := config.ValidateRecipientName(o.RecipientName); err != nil {
+			return err
+		}
+		o.RecipientName = strings.TrimSpace(o.RecipientName)
 	}
 
 	_, err := changeRecipients(o, "add-recipient", func(current []string) ([]string, error) {
@@ -154,7 +169,9 @@ func changeRecipients(o Options, command string, next func(current []string) ([]
 	}
 	all = config.UniqueRecipients(all)
 	current := config.UniqueRecipients(managed.Recipients)
-	if slices.Equal(current, all) {
+	membershipChanged := !slices.Equal(current, all)
+	nameChanged := o.RecipientName != "" && managed.RecipientNames[o.Recipients[0]] != o.RecipientName
+	if !membershipChanged && !nameChanged {
 		ui.Okf("Recipients are unchanged; nothing to commit.")
 		return all, nil
 	}
@@ -163,13 +180,22 @@ func changeRecipients(o Options, command string, next func(current []string) ([]
 		changed = recipientDifference(current, all)
 	}
 
-	files, err := e.Git.TrackedFilterPaths(func(driver string) bool { return driver == "sops" })
-	if err != nil {
-		return nil, err
+	managed.Recipients = all
+	if nameChanged {
+		managed.SetRecipientName(o.Recipients[0], o.RecipientName)
+	}
+	var files []string
+	if membershipChanged {
+		files, err = e.Git.TrackedFilterPaths(func(driver string) bool { return driver == "sops" })
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		changed = o.Recipients
 	}
 
 	err = pathTransaction(e, func() error {
-		if err := config.WriteSopsConfig(e.Root, specs, all, false, ui.Warnf); err != nil {
+		if err := config.WriteManagedConfig(e.Root, specs, managed, false, ui.Warnf); err != nil {
 			return err
 		}
 		if err := ConfigureLocal(e); err != nil {
@@ -193,6 +219,9 @@ func changeRecipients(o Options, command string, next func(current []string) ([]
 	})
 	if err != nil {
 		return nil, err
+	}
+	if !membershipChanged {
+		specs = nil
 	}
 	if err := commitChanges(e, o, command, specs, changed); err != nil {
 		return nil, err

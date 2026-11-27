@@ -16,6 +16,7 @@ import (
 )
 
 type Options struct {
+	RecipientName          string
 	Group                  string
 	Everywhere             bool
 	DryRun                 bool

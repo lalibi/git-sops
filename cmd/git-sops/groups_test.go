@@ -50,6 +50,48 @@ func TestAccessListsAllRecipients(t *testing.T) {
 	}
 }
 
+func TestRecipientName(t *testing.T) {
+	s := newSandbox(t)
+	repo := protectedRepo(t, s)
+	s.git(repo, "commit", "-m", "initialize")
+	_, key := groupMember(t, s, "collaborator")
+	policy := filepath.Join(repo, ".sops.yaml")
+	owner := recipientIn(t, read(t, policy))
+	if r := s.gitSops(repo, "add-recipient", "--name", "Ambiguous", owner, key); r.code == 0 {
+		t.Fatal("accepted a single name for two recipients")
+	}
+	if r := s.gitSops(repo, "add-recipient", "--name", "two\nlines", key); r.code == 0 {
+		t.Fatal("accepted a multiline name")
+	}
+	s.mustGitSops(repo, "add-recipient", "--name", "Alex Morgan", key, "--commit")
+	for _, args := range [][]string{{"access"}, {"access", key}} {
+		out := s.mustGitSops(repo, args...)
+		if !strings.Contains(out, key) || !strings.Contains(out, "Alex Morgan") {
+			t.Fatal("recipient name or key missing from access output")
+		}
+	}
+	s.mustGitSops(repo, "init")
+	before := s.git(repo, "rev-parse", ":secrets/token.txt")
+	s.mustGitSops(repo, "add-recipient", "--name", "Alex #2", key, "--commit")
+	if after := s.git(repo, "rev-parse", ":secrets/token.txt"); after != before {
+		t.Fatal("renaming a recipient changed ciphertext")
+	}
+	s.mustGitSops(repo, "group", "set", "ops", owner, "--commit")
+	s.mustGitSops(repo, "add-recipient", "--group", "ops", "--name", "Operations", key, "--dry-run")
+	if !strings.Contains(read(t, policy), "Alex #2") {
+		t.Fatal("preview changed the name or conversion lost it")
+	}
+	s.mustGitSops(repo, "add-recipient", "--group", "ops", "--name", "Operations", key, "--commit")
+	s.mustGitSops(repo, "remove-recipient", "--group", "ops", key, "--commit")
+	if !strings.Contains(s.mustGitSops(repo, "access", key), "Operations") {
+		t.Fatal("remaining group lost the name")
+	}
+	s.mustGitSops(repo, "remove-recipient", "--everywhere", key, "--commit")
+	if strings.Contains(read(t, policy), key) {
+		t.Fatal("removed recipient or its name remains")
+	}
+}
+
 func TestRecipientGroups(t *testing.T) {
 	s := newSandbox(t)
 	repo := protectedRepo(t, s)

@@ -13,6 +13,8 @@ func TestNormalizePath(t *testing.T) {
 		"secrets/":                 "secrets",
 		`src\Web\appsettings.json`: "src/Web/appsettings.json",
 		"/appsettings.json":        "appsettings.json",
+		"*.json":                   "*.json",
+		"**/*.env":                 "**/*.env",
 	}
 	for in, want := range good {
 		got, err := NormalizePath(in)
@@ -21,7 +23,7 @@ func TestNormalizePath(t *testing.T) {
 		}
 	}
 
-	for _, in := range []string{"", "/", ".", "./", "../x", "a/../b", "*.json", "a?b", "a[1]", "a\nb", "C:/secrets"} {
+	for _, in := range []string{"", "/", ".", "./", "../x", "a/../b", "a?b", "a[1]", "a\nb", "C:/secrets", "a*/b.env", "a**/b.env", "***.env", "*.env/", "**/*", "**/*.yaml", "dir/*.gitattributes"} {
 		if _, err := NormalizePath(in); err == nil {
 			t.Errorf("NormalizePath(%q) should fail", in)
 		}
@@ -50,6 +52,30 @@ func TestQuotedPathsRoundTripManagedPolicy(t *testing.T) {
 	m, err := ReadManaged(filepath.Join(root, ".sops.yaml"))
 	if err != nil || m == nil || strings.Join(m.ProtectedPaths, ",") != "private folder/,it's-secret.txt" {
 		t.Fatalf("policy round trip: %+v, %v", m, err)
+	}
+}
+
+func TestFileGlobMatchesSOPSPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		pattern         string
+		matches, misses []string
+	}{
+		{"**/*.env", []string{".env", "prod.env", "dir/.env", "x/y/prod.env"}, []string{"prod.env.bak", "prod.env/other"}},
+		{"*.env", []string{".env", "prod.env"}, []string{"dir/prod.env"}},
+		{"api/**/prod-*.env", []string{"api/prod-.env", "api/v1/db/prod-app.env"}, []string{"prod-app.env", "other/api/prod-app.env", "api/v1/prod-test.env.old"}},
+	} {
+		specs, err := BuildSpecs(t.TempDir(), []string{tc.pattern})
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy := regexp.MustCompile("^" + specs[0].RegexPart + "$")
+		for want, paths := range map[bool][]string{true: tc.matches, false: tc.misses} {
+			for _, file := range paths {
+				if Matches(specs[0], file) != want || policy.MatchString(file) != want || policy.MatchString(strings.ReplaceAll(file, "/", `\`)) != want {
+					t.Errorf("%q on %q: expected %v in both the selector and SOPS rule", tc.pattern, file, want)
+				}
+			}
+		}
 	}
 }
 
@@ -134,7 +160,7 @@ func TestCompactMigratedAttributes(t *testing.T) {
 		"\ncerts/**" + attrs + "secrets/**" + attrs +
 		"\n# CoreOS runs these scripts directly; preserve Unix line endings.\nobservability/*.sh text eol=lf\n"
 	specs, err := BuildSpecs(t.TempDir(), []string{"secrets/", ".env", "observability/portal.env",
-		"certs/name with spaces.pem", "_backups/db/db.dump", "secrets.md"})
+		"certs/name with spaces.pem", "_backups/db/db.dump", "secrets.md", "**/*.env"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +186,8 @@ func TestKeepRulesForIncompleteOrOverriddenCoverage(t *testing.T) {
 		{"dir/file.env", "dir/** filter=sops -text\n"},
 		{"dir/file.env", "other/**" + full},
 		{"dir/file.env", "dir/**" + full + "**/dir/file.env -filter\n"},
+		{"**/*.env", "**/*.env" + full + "private/prod.env -filter\n"},
+		{"**/*.env", "/services/*.env" + full},
 	} {
 		specs, err := BuildSpecs(t.TempDir(), []string{tc.path})
 		if err != nil {

@@ -251,8 +251,10 @@ func Stage(e *Env, specs []config.Spec) error {
 	}
 	// git add writes objects before a hook can reject the index. Check new
 	// files and nested working-tree overrides before giving any data to Git.
+	var paths []string
 	if len(specs) != 0 {
-		paths, err := e.Git.ZList("ls-files", "-z", "--cached", "--others", "--exclude-standard")
+		var err error
+		paths, err = e.Git.ZList("ls-files", "-z", "--cached", "--others", "--exclude-standard")
 		if err != nil {
 			return err
 		}
@@ -271,13 +273,40 @@ func Stage(e *Env, specs []config.Spec) error {
 	for i, spec := range specs {
 		bar.Set(int64(i), spec.RelativePath)
 
+		if spec.IsGlob() {
+			for _, file := range paths {
+				if !config.Matches(spec, file) {
+					continue
+				}
+				// A tracked filename may now be a directory. Passing it to git
+				// add would also stage children outside the filename pattern.
+				info, err := os.Lstat(filepath.Join(e.Root, filepath.FromSlash(file)))
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				if err != nil {
+					bar.Abort()
+					return err
+				}
+				if !info.Mode().IsRegular() {
+					bar.Abort()
+					return fmt.Errorf("cannot protect non-regular file %q matching %q", file, spec.RelativePath)
+				}
+				if err := e.stagePath(file); err != nil {
+					bar.Abort()
+					return err
+				}
+				staged++
+			}
+			continue
+		}
 		abs := filepath.Join(e.Root, filepath.FromSlash(spec.RelativePath))
 		if _, err := os.Stat(abs); err != nil {
 			ui.Warnf("Protected path '%s' does not exist yet; the rule was configured but no file was staged.", spec.RelativePath)
 			continue
 		}
 
-		if err := e.stagePath(spec); err != nil {
+		if err := e.stagePath(spec.RelativePath); err != nil {
 			bar.Abort()
 			return err
 		}
@@ -324,8 +353,8 @@ func checkSelectedFilters(g *gitx.Git, files []string, specs []config.Spec, cach
 	return nil
 }
 
-func (e *Env) stagePath(spec config.Spec) error {
-	tracked, err := e.trackedFiles(spec)
+func (e *Env) stagePath(path string) error {
+	tracked, err := e.Git.ZList("--literal-pathspecs", "ls-files", "-z", "--", path)
 	if err != nil {
 		return err
 	}
@@ -341,24 +370,16 @@ func (e *Env) stagePath(spec config.Spec) error {
 
 	// Files tracked as plaintext have to be rewritten through the clean filter.
 	if renormalize {
-		if _, err := e.Git.Run(nil, "add", "--renormalize", "--", spec.RelativePath); err != nil {
-			return fmt.Errorf("could not renormalize '%s': %w", spec.RelativePath, err)
+		if _, err := e.Git.Run(nil, "--literal-pathspecs", "add", "--renormalize", "--", path); err != nil {
+			return fmt.Errorf("could not renormalize '%s': %w", path, err)
 		}
 	}
 
 	// Stages new files and refreshes tracked ones; existing ciphertext stays stable through clean.
-	if _, err := e.Git.Run(nil, "add", "--", spec.RelativePath); err != nil {
-		return fmt.Errorf("could not stage protected path '%s': %w", spec.RelativePath, err)
+	if _, err := e.Git.Run(nil, "--literal-pathspecs", "add", "--", path); err != nil {
+		return fmt.Errorf("could not stage protected path '%s': %w", path, err)
 	}
 	return nil
-}
-
-func (e *Env) trackedFiles(spec config.Spec) ([]string, error) {
-	pathspec := spec.RelativePath
-	if spec.IsDirectory {
-		pathspec += "/"
-	}
-	return e.Git.ZList("ls-files", "-z", "--", pathspec)
 }
 
 // legacyTooling lists files the PowerShell-based implementation copied into every repository.

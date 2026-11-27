@@ -108,6 +108,11 @@ func editAccess(e *Env, o Options, action string) error {
 		return fmt.Errorf("unknown access operation %q", action)
 	}
 	next.Recipients = next.Groups[config.DefaultGroup]
+	if o.RecipientName != "" && old.RecipientNames[o.Recipients[0]] != o.RecipientName {
+		next.RecipientNames = maps.Clone(old.RecipientNames)
+		next.SetRecipientName(o.Recipients[0], o.RecipientName)
+		ui.Infof("Recipient %s: %s", o.Recipients[0], o.RecipientName)
+	}
 	specs, err := config.BuildSpecs(e.Root, next.ProtectedPaths)
 	if err != nil {
 		return err
@@ -127,7 +132,7 @@ func editAccess(e *Env, o Options, action string) error {
 	var affected []config.Spec
 	for i, p := range next.ProtectedPaths {
 		g := next.GroupForRule(p)
-		if !slices.Contains(old.ProtectedPaths, p) || g != old.GroupForRule(p) || !slices.Equal(config.UniqueRecipients(old.KeysFor(p)), next.KeysFor(p)) {
+		if !slices.Contains(old.ProtectedPaths, p) || g != old.GroupForRule(p) || !slices.Equal(config.UniqueRecipients(old.KeysForRule(p)), next.KeysForRule(p)) {
 			ui.Printf("  %s  [%s]", p, g)
 			affected = append(affected, specs[i])
 		}
@@ -190,7 +195,7 @@ func editAccess(e *Env, o Options, action string) error {
 		policy := &next
 		// Naming the shared default explicitly still represents a legacy-compatible policy.
 		if old.Groups == nil && len(next.Groups) == 1 {
-			policy = &config.Managed{Recipients: next.Recipients}
+			policy = &config.Managed{Recipients: next.Recipients, RecipientNames: next.RecipientNames}
 		}
 		if err := writeConfig(e, specs, policy, false, o); err != nil {
 			return err

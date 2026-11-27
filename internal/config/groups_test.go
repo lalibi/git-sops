@@ -9,6 +9,35 @@ import (
 	"filippo.io/age"
 )
 
+func TestGroupedGlobsFollowSOPSPrecedence(t *testing.T) {
+	root := t.TempDir()
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{id.Recipient().String()}
+	m := &Managed{Groups: map[string][]string{DefaultGroup: keys, "ops": keys}, Assignments: map[string]string{"**/*.env": "ops"}}
+	specs, err := BuildSpecs(root, []string{"**/*.env", "api/", "ops/**/*.env", ".env", "*.env"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteManagedConfig(root, specs, m, false, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ReadManaged(filepath.Join(root, ".sops.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(parsed.ProtectedPaths, ","); got != ".env,api/,ops/**/*.env,*.env,**/*.env" {
+		t.Fatalf("SOPS rule order = %q", got)
+	}
+	for file, want := range map[string]string{".env": ".env", "api/prod.env": "api/", "ops/db/prod.env": "ops/**/*.env", "other.env": "*.env", "sub/other.env": "**/*.env", "other.xml": ""} {
+		if got := parsed.RuleFor(file); got != want {
+			t.Errorf("rule for %s = %q, want %q", file, got, want)
+		}
+	}
+}
+
 func TestGroupedPolicyRejectsAmbiguousOrIncompleteRules(t *testing.T) {
 	root := t.TempDir()
 	id, err := age.GenerateX25519Identity()
