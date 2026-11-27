@@ -4,11 +4,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -311,13 +311,27 @@ func ParseManaged(data []byte) (*Managed, error) {
 	default:
 		return nil, nil
 	}
-	for _, line := range lines {
-		value, ok := strings.CutPrefix(line, "# recipient-name: ")
+	for i, line := range lines {
+		comment := strings.TrimLeft(line, " ")
+		value, ok := strings.CutPrefix(comment, "# recipient-name: ")
 		if !ok {
 			continue
 		}
-		key, name, ok := strings.Cut(value, " ")
-		if !ok || !IsRecipient(key) || ValidateRecipientName(name) != nil || m.RecipientNames[key] != "" {
+		var key, name string
+		if line == comment {
+			// v0.5.0 stored the key and label together in the file header.
+			key, name, _ = strings.Cut(value, " ")
+		} else {
+			indent := line[:len(line)-len(comment)]
+			if i+1 >= len(lines) || !strings.HasPrefix(lines[i+1], indent+"- ") {
+				return nil, errors.New("recipient-name comment must immediately precede its recipient")
+			}
+			if entry := recipientLine.FindStringSubmatch(lines[i+1]); entry != nil {
+				key = entry[1]
+			}
+			name = value
+		}
+		if !IsRecipient(key) || ValidateRecipientName(name) != nil || m.RecipientNames[key] != "" {
 			return nil, errors.New("invalid or duplicate recipient-name comment")
 		}
 		m.SetRecipientName(key, strings.TrimSpace(name))
@@ -375,37 +389,33 @@ func WriteManagedConfig(root string, specs []Spec, m *Managed, force bool, warnf
 		specs = orderedSpecs(specs)
 	}
 	lines := []string{marker}
-	// Keep names separate from the bare age entries read by older versions.
-	keys := slices.Clone(m.Recipients)
-	for _, members := range m.Groups {
-		keys = append(keys, members...)
-	}
-	for _, key := range UniqueRecipients(keys) {
-		if name, ok := names[key]; ok {
-			if err := ValidateRecipientName(name); err != nil {
-				return err
+	// Older shared-policy readers require each key on a bare list-item line.
+	// Label its first occurrence, even when it belongs to several groups.
+	pendingNames := maps.Clone(names)
+	appendRecipients := func(indent string, keys []string) error {
+		for _, key := range keys {
+			if name, ok := pendingNames[key]; ok {
+				if err := ValidateRecipientName(name); err != nil {
+					return err
+				}
+				lines = append(lines, indent+"# recipient-name: "+name)
+				delete(pendingNames, key)
 			}
-			lines = append(lines, "# recipient-name: "+key+" "+name)
+			lines = append(lines, indent+"- "+key)
 		}
-	}
-	for _, s := range specs {
-		comment := s.RelativePath
-		if s.IsDirectory {
-			comment += "/"
-		}
-		lines = append(lines, "# protected-path: "+comment)
+		return nil
 	}
 	if m.Groups == nil {
 		lines = append(lines, "", "recipients: &recipients")
-		for _, r := range UniqueRecipients(m.Recipients) {
-			lines = append(lines, "  - "+r)
+		if err := appendRecipients("  ", UniqueRecipients(m.Recipients)); err != nil {
+			return err
 		}
 	} else {
 		lines = append(lines, "", "recipient_groups:")
 		for _, group := range m.GroupNames() {
 			lines = append(lines, "  "+group+": &"+group)
-			for _, r := range m.Groups[group] {
-				lines = append(lines, "    - "+r)
+			if err := appendRecipients("    ", m.Groups[group]); err != nil {
+				return err
 			}
 		}
 	}
@@ -421,6 +431,12 @@ func WriteManagedConfig(root string, specs []Spec, m *Managed, force bool, warnf
 		if m.Groups != nil {
 			alias = m.GroupForRule(s.RelativePath)
 		}
+		comment := s.RelativePath
+		if s.IsDirectory {
+			comment += "/"
+		}
+		// Released readers recognize protected-path comments at column one.
+		lines = append(lines, "# protected-path: "+comment)
 		lines = append(lines, "  - path_regex: '^"+strings.ReplaceAll(s.RegexPart, "'", "''")+"$'", "    age: *"+alias)
 	}
 

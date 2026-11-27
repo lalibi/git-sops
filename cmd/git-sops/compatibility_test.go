@@ -52,6 +52,7 @@ func TestCompatibilityWithV032(t *testing.T) {
 		t.Fatal("using the new CLI changed the released policy or ciphertext")
 	}
 
+	s.mustGitSops(repo, "add-recipient", "--name", "HAL9000", key, "--commit")
 	write(t, filepath.Join(repo, "service key.txt"), "shared token\n")
 	s.mustGitSops(repo, "protect", "service key.txt", "--group", "default", "--commit")
 	if !strings.HasPrefix(read(t, policy), "# Managed by git-sops\n") || !strings.Contains(read(t, policy), "age: *recipients") {

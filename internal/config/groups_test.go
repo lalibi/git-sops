@@ -64,7 +64,7 @@ func TestGroupedPolicyRejectsAmbiguousOrIncompleteRules(t *testing.T) {
 	}
 	for _, invalid := range []string{
 		head + "creation_rules:\n" + strings.TrimSuffix(second, "\n") + "\n\n" + first + "\n",
-		head + "creation_rules:\n" + first + "\n",
+		head + "creation_rules:\n" + first + "\n\n# protected-path: secrets/\n",
 		strings.Replace(string(data), "age: *production", "age: *missing", 1),
 		strings.Replace(string(data), "age: *production", "age: *production\n    pgp: another-key", 1),
 	} {

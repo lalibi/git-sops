@@ -86,20 +86,20 @@ git-sops writes one creation rule per protected path. Each rule references the s
 
 ```yaml
 # Managed by git-sops
-# protected-path: secrets/
-# protected-path: appsettings.json
-# protected-path: src/Web/appsettings.Production.json
 
 recipients: &recipients
   - age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 creation_rules:
+# protected-path: secrets/
   - path_regex: '^secrets[\\/].*$'
     age: *recipients
 
+# protected-path: appsettings.json
   - path_regex: '^appsettings\.json$'
     age: *recipients
 
+# protected-path: src/Web/appsettings.Production.json
   - path_regex: '^src[\\/]Web[\\/]appsettings\.Production\.json$'
     age: *recipients
 ```
@@ -135,9 +135,11 @@ recipient_groups:
     - age1... # recovery
 
 creation_rules:
+# protected-path: secrets/production.env
   - path_regex: '^secrets[\\/]production\.env$'
     age: *certificates
 
+# protected-path: secrets/
   - path_regex: '^secrets[\\/].*$'
     age: *default
 ```

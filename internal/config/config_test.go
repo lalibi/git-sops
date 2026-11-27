@@ -8,6 +8,31 @@ import (
 	"testing"
 )
 
+func TestMigrateRecipientNameComment(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".sops.yaml")
+	const key = "age1abc"
+	const name = "HAL9000 # recovery"
+	legacy := SopsMarker + "\n# recipient-name: " + key + " " + name + "\nrecipients: &recipients\n  - " + key + "\ncreation_rules: []\n"
+	if err := os.WriteFile(path, []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSopsConfig(root, nil, []string{key}, false, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(data), key) != 1 || !strings.Contains(string(data), "  # recipient-name: "+name+"\n  - "+key+"\n") {
+		t.Fatalf("unexpected migrated policy:\n%s", data)
+	}
+	managed, err := ParseManaged(data)
+	if err != nil || managed.RecipientNames[key] != name {
+		t.Fatalf("label round trip: %+v, %v", managed, err)
+	}
+}
+
 func TestNormalizePath(t *testing.T) {
 	good := map[string]string{
 		"secrets/":                 "secrets",
@@ -222,6 +247,17 @@ func TestSopsConfigRoundTrip(t *testing.T) {
 	}
 	if got := strings.Join(m.ProtectedPaths, ","); got != "secrets/,appsettings.json" {
 		t.Errorf("protected paths = %s", got)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".sops.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rules, ok := strings.Cut(string(data), "creation_rules:\n")
+	for i, path := range m.ProtectedPaths {
+		label := "# protected-path: " + path + "\n"
+		if !ok || strings.Count(string(data), label) != 1 || !strings.Contains(rules, label+"  - path_regex: '^"+specs[i].RegexPart+"$'") {
+			t.Errorf("expected one label above the creation rule for %q", path)
+		}
 	}
 }
 
