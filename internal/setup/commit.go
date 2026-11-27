@@ -39,6 +39,7 @@ func recipientDifference(a, b []string) []string {
 
 func generatedCommitMessage(command string, specs []config.Spec, recipients []string) string {
 	titles := map[string]string{
+		"group-set":         "🔐 Update recipient group",
 		"init":              "🔐 Configure transparent file encryption",
 		"protect":           "🔐 Protect additional paths",
 		"unprotect":         "🔓 Remove file protection",
@@ -52,10 +53,12 @@ func generatedCommitMessage(command string, specs []config.Spec, recipients []st
 	switch command {
 	case "unprotect":
 		pathsLabel = "Remove protection from the following paths:"
-	case "add-recipient", "remove-recipient":
+	case "add-recipient", "remove-recipient", "group-set":
 		label := "Add the following public age recipients:"
 		if command == "remove-recipient" {
 			label = "Remove the following public age recipients:"
+		} else if command == "group-set" {
+			label = "Set group membership to the following public age recipients:"
 		}
 		body.WriteString(label + "\n")
 		for _, r := range recipients {
@@ -65,7 +68,9 @@ func generatedCommitMessage(command string, specs []config.Spec, recipients []st
 		pathsLabel = "Re-encrypt the following protected paths:"
 	}
 	paths := specPaths(specs)
-	if len(paths) == 0 {
+	if len(paths) == 0 && (command == "group-set" || strings.HasSuffix(command, "-recipient")) {
+		body.WriteString("No existing protected paths are affected.\n")
+	} else if len(paths) == 0 {
 		body.WriteString("No paths are protected.\n")
 	} else {
 		body.WriteString(pathsLabel + "\n")
@@ -94,6 +99,11 @@ func commitChanges(e *Env, o Options, command string, specs []config.Spec, recip
 	message := o.Message
 	if message == "" {
 		message = generatedCommitMessage(command, specs, recipients)
+		if o.Everywhere {
+			message += "\nRecipient scope: every group\n"
+		} else if o.Group != "" {
+			message += "\nRecipient group: " + o.Group + "\n"
+		}
 	}
 	file, err := os.CreateTemp("", "git-sops-commit-*.txt")
 	if err != nil {
@@ -106,7 +116,7 @@ func commitChanges(e *Env, o Options, command string, specs []config.Spec, recip
 		return err
 	}
 	if err := e.Git.Passthrough("commit", "--file", file.Name()); err != nil {
-		return fmt.Errorf("Git commit failed; prepared changes remain staged for review and retry: %w", err)
+		return fmt.Errorf("commit failed; prepared changes remain staged for review and retry: %w", err)
 	}
 	return nil
 }

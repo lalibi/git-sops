@@ -4,7 +4,58 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"filippo.io/age"
 )
+
+func TestProtectUpgradesCombinedRule(t *testing.T) {
+	s := newSandbox(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	s.git(filepath.Dir(repo), "init", repo)
+	owner, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, s.keyFile, owner.String()+"\n")
+	policy := filepath.Join(repo, ".sops.yaml")
+	legacy := "# Managed by git-sops\n# protected-path: secrets/\n# protected-path: .env\n" +
+		"creation_rules:\n  - path_regex: '^(?:secrets[\\\\/].*|\\.env)$'\n    age:\n" +
+		"      - " + owner.Recipient().String() + "\n      - " + other.Recipient().String() + "\n"
+	write(t, policy, legacy)
+	const attrs = " filter=sops diff=sops merge=sops -text\n"
+	write(t, filepath.Join(repo, ".gitattributes"), "# BEGIN SOPS TRANSPARENT ENCRYPTION\n/secrets/**"+attrs+"/.env"+attrs+"# END SOPS TRANSPARENT ENCRYPTION\n")
+	s.mustGitSops(repo, "join")
+	write(t, filepath.Join(repo, "secrets", "token"), "original secret")
+	write(t, filepath.Join(repo, ".env"), "TOKEN=original\n")
+	s.git(repo, "add", ".")
+	s.git(repo, "commit", "-m", "old combined policy")
+	if read(t, policy) != legacy {
+		t.Fatal("join or ordinary Git operations rewrote the old policy")
+	}
+
+	write(t, filepath.Join(repo, "api", "production.env"), "TOKEN=new\n")
+	s.mustGitSops(repo, "protect", "api/production.env")
+	staged := s.git(repo, "cat-file", "blob", ":.sops.yaml")
+	for _, pattern := range []string{`^secrets[\\/].*$`, `^\.env$`, `^api[\\/]production\.env$`} {
+		if !strings.Contains(staged, "  - path_regex: '"+pattern+"'\n    age: *recipients\n") {
+			t.Fatalf("missing shared-recipient rule for %s", pattern)
+		}
+	}
+	encrypted := s.git(repo, "cat-file", "blob", ":api/production.env")
+	for _, key := range []string{owner.Recipient().String(), other.Recipient().String()} {
+		if strings.Count(staged, key) != 1 || !strings.Contains(encrypted, key) {
+			t.Fatal("recipient missing from the policy or the newly encrypted file")
+		}
+	}
+	if changed := s.git(repo, "diff", "--cached", "--name-only", "--", "secrets/", ".env"); changed != "" {
+		t.Fatalf("upgrade changed existing ciphertext: %s", changed)
+	}
+	s.mustGitSops(repo, "verify")
+}
 
 func TestProtectAndUnprotectCompleteRules(t *testing.T) {
 	s := newSandbox(t)
@@ -105,5 +156,33 @@ func TestProtectRejectsOverridingAttributes(t *testing.T) {
 	}
 	if read(t, attrs) != before || s.git(repo, "write-tree") != index {
 		t.Fatal("failed protection was not rolled back")
+	}
+}
+
+func TestProtectValidatesNewFileBeforeGitWritesItsBlob(t *testing.T) {
+	s := newSandbox(t)
+	repo := protectedRepo(t, s)
+	s.git(repo, "commit", "-m", "shared policy")
+	write(t, filepath.Join(repo, "example", ".gitattributes"), "sample.txt -filter\n")
+	write(t, filepath.Join(repo, "example", "sample.txt"), "untracked preflight fixture\n")
+	hash := strings.TrimSpace(s.git(repo, "hash-object", "--no-filters", "example/sample.txt"))
+	if r := s.gitSops(repo, "protect", "example/sample.txt"); r.code == 0 || !strings.Contains(r.out, "attributes do not protect") {
+		t.Fatalf("expected working attribute error: %s", r.out)
+	}
+	if r := s.run(repo, "git", "cat-file", "-e", hash); r.code == 0 {
+		t.Fatal("rejected path was written to the object database")
+	}
+}
+
+func TestProtectAfterInitWithoutStaging(t *testing.T) {
+	s := newSandbox(t)
+	repo := t.TempDir()
+	s.git(repo, "init")
+	s.mustGitSops(repo, "init", "--no-stage", "--protect", "secrets/")
+	write(t, filepath.Join(repo, "first.txt"), textSecret)
+	s.mustGitSops(repo, "protect", "first.txt")
+	s.mustGitSops(repo, "verify")
+	if blob := s.git(repo, "cat-file", "blob", ":first.txt"); strings.Contains(blob, textSecret) || !strings.Contains(blob, "sops") {
+		t.Fatal("first index entry was not encrypted")
 	}
 }

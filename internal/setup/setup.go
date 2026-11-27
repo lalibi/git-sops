@@ -9,17 +9,29 @@ import (
 	"strings"
 
 	"github.com/lalibi/git-sops/internal/config"
+	"github.com/lalibi/git-sops/internal/filter"
 	"github.com/lalibi/git-sops/internal/gitx"
 	"github.com/lalibi/git-sops/internal/sopsx"
 	"github.com/lalibi/git-sops/internal/ui"
+	"github.com/lalibi/git-sops/internal/worktree"
 )
 
 type Env struct {
-	Root    string
-	Git     *gitx.Git
-	Sops    *sopsx.Client
-	NoStage bool
-	Force   bool
+	Root            string
+	Git             *gitx.Git
+	Sops            *sopsx.Client
+	NoStage         bool
+	Force           bool
+	beforeWorkWrite func(string) error
+}
+
+func (e *Env) writeWorkFile(path string, data []byte, mode os.FileMode) error {
+	if e.beforeWorkWrite != nil {
+		if err := e.beforeWorkWrite(path); err != nil {
+			return err
+		}
+	}
+	return worktree.WriteFile(e.Root, path, data, mode)
 }
 
 // ExitCodeError makes the process exit with a specific code after printing Message.
@@ -52,9 +64,11 @@ func selfCommand() (string, error) {
 // ConfigureLocal writes the repository-local filter and hook config and decrypts protected files that are still ciphertext.
 func ConfigureLocal(e *Env) error {
 	for _, f := range []string{".gitattributes", ".sops.yaml"} {
-		if _, err := os.Stat(filepath.Join(e.Root, f)); err != nil {
-			return fmt.Errorf("required file '%s' was not found", f)
+		file, err := worktree.Open(e.Root, f)
+		if err != nil {
+			return fmt.Errorf("open required file %q: %w", f, err)
 		}
+		file.Close()
 	}
 
 	self, err := selfCommand()
@@ -80,6 +94,7 @@ func ConfigureLocal(e *Env) error {
 			{"filter.sops.required", "true"},
 			// cachetextconv stays off: it would store decrypted text in the repository.
 			{"diff.sops.textconv", self + " textconv"},
+			{"diff.sops.cachetextconv", "false"},
 			{"merge.sops.name", "SOPS-aware three-way merge"},
 			{"merge.sops.driver", self + " merge %O %A %B %P %L"},
 			{"hook.sops-index.command", self + " verify"},
@@ -98,7 +113,7 @@ func ConfigureLocal(e *Env) error {
 
 		hooks, err := e.Git.Output("hook", "list", "--show-scope", "pre-commit")
 		if err != nil || !hasHook(hooks, "sops-index") {
-			return errors.New("Git did not expose the configured pre-commit hook; Git 2.55 or newer is required")
+			return errors.New("could not find the configured pre-commit hook; Git 2.55 or newer is required")
 		}
 		return nil
 	})
@@ -119,7 +134,7 @@ func ConfigureLocal(e *Env) error {
 		}
 
 		bar.Set(total, "")
-		bar.Finish("Decrypted %d protected file(s)", len(toSmudge))
+		bar.Finish("Prepared %d protected working-tree file(s)", len(toSmudge))
 	}
 
 	return nil
@@ -177,14 +192,19 @@ func (e *Env) decryptToWorkingTree(path string) error {
 
 	plain, err := e.Sops.Decrypt(path, blob)
 	if err != nil {
+		if locked, policyErr := filter.Locked(e.Sops, path, blob); policyErr != nil {
+			return policyErr
+		} else if locked {
+			if _, err := os.Lstat(filepath.Join(e.Root, filepath.FromSlash(path))); errors.Is(err, os.ErrNotExist) {
+				return e.writeWorkFile(path, blob, 0o600)
+			}
+			ui.Infof("Keeping %s encrypted (outside this identity's groups)", path)
+			return nil
+		}
 		return fmt.Errorf("could not decrypt '%s': %w", path, err)
 	}
 
-	abs := filepath.Join(e.Root, filepath.FromSlash(path))
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(abs, plain, 0o644); err != nil {
+	if err := e.writeWorkFile(path, plain, 0o600); err != nil {
 		return err
 	}
 
@@ -229,6 +249,17 @@ func Stage(e *Env, specs []config.Spec) error {
 	if e.NoStage {
 		return nil
 	}
+	// git add writes objects before a hook can reject the index. Check new
+	// files and nested working-tree overrides before giving any data to Git.
+	if len(specs) != 0 {
+		paths, err := e.Git.ZList("ls-files", "-z", "--cached", "--others", "--exclude-standard")
+		if err != nil {
+			return err
+		}
+		if err := checkSelectedFilters(e.Git, paths, specs, false); err != nil {
+			return err
+		}
+	}
 
 	if _, err := e.Git.Run(nil, "add", "--", ".gitattributes", ".sops.yaml"); err != nil {
 		return fmt.Errorf("could not stage the SOPS configuration: %w", err)
@@ -261,10 +292,17 @@ func Stage(e *Env, specs []config.Spec) error {
 // Selected paths must actually use the filter, even when unmanaged or nested
 // attributes override a managed rule. A generic index check cannot detect this.
 func validateSelectedAttributes(g *gitx.Git, specs []config.Spec) error {
+	if len(specs) == 0 {
+		return nil
+	}
 	files, err := g.ZList("ls-files", "-z")
 	if err != nil {
 		return err
 	}
+	return checkSelectedFilters(g, files, specs, true)
+}
+
+func checkSelectedFilters(g *gitx.Git, files []string, specs []config.Spec, cached bool) error {
 	var selected []string
 	for _, p := range files {
 		if config.Protected(specs, p) {
@@ -274,14 +312,13 @@ func validateSelectedAttributes(g *gitx.Git, specs []config.Spec) error {
 	if len(selected) == 0 {
 		return nil
 	}
-	attrs, err := g.Run([]byte(strings.Join(selected, "\x00")+"\x00"), "check-attr", "--cached", "-z", "--stdin", "filter")
+	attrs, err := g.FilterAttributes(selected, cached)
 	if err != nil {
 		return err
 	}
-	fields := strings.Split(string(attrs), "\x00")
-	for i := 0; i+2 < len(fields); i += 3 {
-		if fields[i+2] != "sops" {
-			return fmt.Errorf("attributes do not protect %q; another attribute rule overrides the managed policy", fields[i])
+	for _, path := range selected {
+		if attrs[path] != "sops" {
+			return fmt.Errorf("attributes do not protect %q; another attribute rule overrides the managed policy", path)
 		}
 	}
 	return nil
@@ -334,6 +371,13 @@ var legacyTooling = []string{
 
 // RemoveLegacyTooling deletes the repository-local PowerShell scripts left by the old initializer.
 func RemoveLegacyTooling(e *Env) error {
+	info, err := os.Lstat(filepath.Join(e.Root, ".githooks"))
+	if errors.Is(err, os.ErrNotExist) || err == nil && !info.IsDir() {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
 	var found []string
 	for _, f := range legacyTooling {
 		if _, err := os.Stat(filepath.Join(e.Root, filepath.FromSlash(f))); err == nil {

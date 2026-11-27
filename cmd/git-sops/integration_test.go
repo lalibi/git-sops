@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"filippo.io/age"
+	"github.com/lalibi/git-sops/internal/sopsx"
 )
 
 var binary string
@@ -48,10 +49,11 @@ type sandbox struct {
 func newSandbox(t *testing.T) *sandbox {
 	t.Helper()
 
-	for _, tool := range []string{"git", "sops"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("%s is required for integration tests", tool)
-		}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for integration tests")
+	}
+	if _, err := sopsx.Find(); err != nil {
+		t.Skip("sops is required for integration tests")
 	}
 
 	dir := t.TempDir()
@@ -336,13 +338,54 @@ func TestVerifyRejectsPlaintextInIndex(t *testing.T) {
 	}
 }
 
+func TestVerifyRequiresFilterForSharedPolicy(t *testing.T) {
+	s := newSandbox(t)
+	repo := protectedRepo(t, s)
+	attrs := filepath.Join(repo, ".gitattributes")
+	original := read(t, attrs)
+	write(t, attrs, original+"/secrets/db.json -filter\n")
+	s.git(repo, "add", "--", ".gitattributes")
+	write(t, attrs, original)
+	if r := s.gitSops(repo, "verify"); r.code == 0 || !strings.Contains(r.out, "attributes do not protect") || !strings.Contains(r.out, "secrets/db.json") {
+		t.Fatalf("expected staged policy / attribute disagreement: %s", r.out)
+	}
+}
+
+func TestFailedSharedRekeyPreservesIndexAndPolicy(t *testing.T) {
+	s := newSandbox(t)
+	repo := protectedRepo(t, s)
+	s.git(repo, "commit", "-m", "shared policy")
+	policy := filepath.Join(repo, ".sops.yaml")
+	original := read(t, policy)
+	tree := s.git(repo, "write-tree")
+	_, key := groupMember(t, s, "reader")
+	// A failing validation hook must leave the previously committed access intact.
+	s.git(repo, "config", "hook.review.event", "pre-commit")
+	s.git(repo, "config", "hook.review.command", "exit 1")
+	if r := s.gitSops(repo, "add-recipient", key); r.code == 0 {
+		t.Fatal("expected validation failure")
+	}
+	if read(t, policy) != original || s.git(repo, "write-tree") != tree || s.git(repo, "status", "--porcelain") != "" {
+		t.Fatal("failed shared recipient change modified the policy, index or working files")
+	}
+	// Another Git writer owns this lock. Leave it and the real index untouched.
+	lock := filepath.Join(repo, ".git", "index.lock")
+	write(t, lock, "held by another writer")
+	if r := s.gitSops(repo, "protect", "another.txt"); r.code == 0 || !strings.Contains(r.out, "lock Git index") {
+		t.Fatalf("expected an index lock error: %s", r.out)
+	}
+	if read(t, lock) != "held by another writer" || read(t, policy) != original {
+		t.Fatal("concurrent operation altered another writer's lock or the policy")
+	}
+}
+
 func TestCheckReportsHealthyAndUnconfiguredRepos(t *testing.T) {
 	s := newSandbox(t)
 	repo := protectedRepo(t, s)
 	s.git(repo, "commit", "-m", "protect secrets")
 
 	r := s.gitSops(repo, "check")
-	if r.code != 0 || !strings.Contains(r.out, "2 protected file(s), all ciphertext") {
+	if r.code != 0 || !strings.Contains(r.out, "2 protected file(s) have SOPS metadata") {
 		t.Fatalf("check on a healthy repo (code %d):\n%s", r.code, r.out)
 	}
 
@@ -360,15 +403,11 @@ func TestCheckDistinguishesCustomMissingAndUnreadablePolicies(t *testing.T) {
 	repo := protectedRepo(t, s)
 	policy := filepath.Join(repo, ".sops.yaml")
 	managed := read(t, policy)
-	_, rules, ok := strings.Cut(managed, "creation_rules:")
-	if !ok {
-		t.Fatal("fixture has no creation rules")
-	}
-	write(t, policy, "creation_rules:"+rules)
+	write(t, policy, strings.TrimPrefix(managed, "# Managed by git-sops\n"))
 	r := s.gitSops(repo, "check")
 	if r.code != 0 || !strings.Contains(r.out, "no git-sops management header") ||
 		!strings.Contains(r.out, "Check completed with warnings") || strings.Contains(r.out, "Everything looks good") ||
-		!strings.Contains(r.out, "2 protected file(s), all ciphertext") {
+		!strings.Contains(r.out, "2 protected file(s) have SOPS metadata") {
 		t.Fatalf("custom policy (code %d):\n%s", r.code, r.out)
 	}
 	if err := os.Remove(policy); err != nil {
@@ -391,12 +430,23 @@ func TestInitUpgradesLegacyPowerShellSetup(t *testing.T) {
 	s := newSandbox(t)
 	repo := protectedRepo(t, s)
 
+	policy := filepath.Join(repo, ".sops.yaml")
+	owner := recipientIn(t, read(t, policy))
+	legacy := "# Managed by Initialize-SopsGit.ps1\r\n# protected-path: secrets\r\n" +
+		"creation_rules:\r\n  - path_regex: '^secrets[\\\\/].*$'\r\n    age:\r\n      - " + owner + "\r\n"
+	write(t, policy, legacy)
 	write(t, filepath.Join(repo, ".githooks", "git-sops-filter.ps1"), "# legacy\n")
 	write(t, filepath.Join(repo, ".githooks", "Setup-SopsGit.ps1"), "# legacy\n")
-	s.git(repo, "add", ".githooks")
+	s.git(repo, "add", ".sops.yaml", ".githooks")
 	s.git(repo, "commit", "-m", "legacy setup")
 
+	if out := s.mustGitSops(repo, "access", owner); !strings.Contains(out, "2 accessible tracked file(s)") || strings.Contains(out, "staged recipients differ") || read(t, policy) != legacy {
+		t.Fatalf("incorrect access audit for legacy directory rule: %s", out)
+	}
 	s.mustGitSops(repo, "init")
+	if got := read(t, policy); !strings.Contains(got, owner) || !strings.Contains(got, "# protected-path: secrets/\n") || !strings.HasPrefix(got, "# Managed by git-sops\n") {
+		t.Fatal("PowerShell upgrade should retain the directory rule and shared recipient")
+	}
 
 	if _, err := os.Stat(filepath.Join(repo, ".githooks")); err == nil {
 		t.Error("legacy .githooks should be removed")
@@ -494,6 +544,7 @@ func TestDecryptWithoutGit(t *testing.T) {
 
 func TestDiffShowsDecryptedChanges(t *testing.T) {
 	s := newSandbox(t)
+	s.git(t.TempDir(), "config", "--global", "diff.sops.cachetextconv", "true")
 	repo := protectedRepo(t, s)
 	s.git(repo, "commit", "-m", "protect secrets")
 
@@ -508,8 +559,8 @@ func TestDiffShowsDecryptedChanges(t *testing.T) {
 	if strings.Contains(diff, "ENC[") {
 		t.Errorf("diff still shows ciphertext:\n%s", diff)
 	}
-	if r := s.run(repo, "git", "config", "--local", "diff.sops.cachetextconv"); r.code == 0 && strings.TrimSpace(r.out) == "true" {
-		t.Error("cachetextconv would store plaintext in the repository")
+	if got := strings.TrimSpace(s.git(repo, "config", "--get", "diff.sops.cachetextconv")); got != "false" {
+		t.Error("repository setup should explicitly disable the inherited plaintext diff cache")
 	}
 }
 

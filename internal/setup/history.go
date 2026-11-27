@@ -142,7 +142,7 @@ func EncryptHistory(o Options, approved bool) error {
 	if err := os.Mkdir(policyDir, 0o700); err != nil {
 		return err
 	}
-	if err := config.WriteSopsConfig(policyDir, specs, m.Recipients, false, ui.Warnf); err != nil {
+	if err := config.WriteManagedConfig(policyDir, specs, m, false, ui.Warnf); err != nil {
 		return err
 	}
 	policy, err := os.ReadFile(filepath.Join(policyDir, ".sops.yaml"))
@@ -225,36 +225,35 @@ func EncryptHistory(o Options, approved bool) error {
 			return err
 		}
 	}
-	if err := pathTransaction(e, attributes, func() error {
+	swapped := false
+	if err := pathTransaction(e, func() error {
 		if err := swapHistoryRefs(e.Git, refs, newRefs, head, newHead, symErr != nil); err != nil {
 			return err
 		}
-		restore := func(cause error) error {
-			return errors.Join(cause, swapHistoryRefs(e.Git, newRefs, refs, newHead, head, symErr != nil))
-		}
+		swapped = true
 		if _, err := e.Git.Run(nil, "read-tree", "HEAD"); err != nil {
-			return restore(err)
+			return err
 		}
 		for _, p := range append(attributes, ".gitattributes", ".sops.yaml") {
 			b, err := e.Git.Run(nil, "cat-file", "blob", "HEAD:"+p)
 			if err != nil {
-				return restore(err)
+				return err
 			}
-			if err := os.WriteFile(filepath.Join(e.Root, p), b, 0o644); err != nil {
-				return restore(err)
+			if err := e.writeWorkFile(p, b, 0o644); err != nil {
+				return err
 			}
 		}
 		if err := ConfigureLocal(e); err != nil {
-			return restore(err)
+			return err
 		}
 		if err := validateSelectedAttributes(e.Git, specs); err != nil {
-			return restore(err)
+			return err
 		}
-		if err := ValidateIndex(e); err != nil {
-			return restore(err)
-		}
-		return nil
+		return ValidateIndex(e)
 	}); err != nil {
+		if swapped {
+			err = errors.Join(err, swapHistoryRefs(e.Git, newRefs, refs, newHead, head, symErr != nil))
+		}
 		return fmt.Errorf("rewrite failed; recovery bundle: %s: %w", backup, err)
 	}
 	ui.Okf("History encrypted in place. Review all refs before publishing. No remote was changed.")

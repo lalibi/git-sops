@@ -86,8 +86,8 @@ func (c *Client) Decrypt(path string, encrypted []byte) ([]byte, error) {
 		"--output-type", t.Plain)
 }
 
-// IsEncrypted reports whether blob is valid SOPS ciphertext. filestatus only
-// accepts a file argument, so the blob goes through a temporary file.
+// IsEncrypted checks for SOPS metadata with filestatus. Authenticating the MAC
+// requires decryption. filestatus only accepts a file argument.
 func (c *Client) IsEncrypted(path string, blob []byte) bool {
 	tmp, err := os.CreateTemp("", "sops-check-*"+filepath.Ext(path))
 	if err != nil {
@@ -116,7 +116,7 @@ func (c *Client) IsEncrypted(path string, blob []byte) bool {
 }
 
 func (c *Client) Version() (string, error) {
-	out, err := c.run(nil, "--version")
+	out, err := c.run(nil, "--version", "--disable-version-check")
 	if err != nil {
 		return "", err
 	}

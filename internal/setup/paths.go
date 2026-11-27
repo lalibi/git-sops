@@ -9,6 +9,7 @@ import (
 
 	"github.com/lalibi/git-sops/internal/config"
 	"github.com/lalibi/git-sops/internal/ui"
+	"github.com/lalibi/git-sops/internal/worktree"
 )
 
 func managedPolicy(e *Env) (*config.Managed, error) {
@@ -54,6 +55,9 @@ func Protect(o Options) error {
 	if err != nil {
 		return err
 	}
+	if m.Groups != nil || o.Group != "" || o.DryRun {
+		return editAccess(e, o, "protect")
+	}
 	requested, err := config.BuildSpecs(e.Root, o.Protect)
 	if err != nil {
 		return err
@@ -68,18 +72,8 @@ func Protect(o Options) error {
 	if err != nil {
 		return err
 	}
-	files, err := e.Git.ZList("ls-files", "-z")
-	if err != nil {
-		return err
-	}
-	var touched []string
-	for _, p := range files {
-		if config.Protected(specs, p) {
-			touched = append(touched, p)
-		}
-	}
-	err = pathTransaction(e, touched, func() error {
-		if err := writeConfig(e, specs, m.Recipients, false, o); err != nil {
+	err = pathTransaction(e, func() error {
+		if err := writeConfig(e, specs, m, false, o); err != nil {
 			return err
 		}
 		if err := ConfigureLocal(e); err != nil {
@@ -179,8 +173,7 @@ func Unprotect(o Options) error {
 	if err != nil {
 		return err
 	}
-	// Decrypt before changing policy. A missing key must leave configuration and index untouched.
-	plain := map[string][]byte{}
+	var selected []string
 	for _, p := range files {
 		if !config.Protected(removed, p) || config.Protected(remaining, p) {
 			continue
@@ -192,43 +185,36 @@ func Unprotect(o Options) error {
 		if !st.Mode().IsRegular() {
 			return fmt.Errorf("cannot unprotect non-regular file %q", p)
 		}
-		b, err := os.ReadFile(filepath.Join(e.Root, filepath.FromSlash(p)))
-		if err != nil {
-			return err
-		}
-		if e.Sops.IsEncrypted(p, b) {
-			b, err = e.Sops.Decrypt(p, b)
-			if err != nil {
-				return fmt.Errorf("decrypt %q before unprotecting: %w", p, err)
-			}
-		}
-		plain[p] = b
+		selected = append(selected, p)
 	}
 	ui.Warnf("Removing protection stages current contents as PLAINTEXT. Review before committing. Earlier commits remain encrypted.")
-	err = pathTransaction(e, filesToChange(plain), func() error {
-		if err := writeConfig(e, remaining, m.Recipients, false, o); err != nil {
+	err = pathTransaction(e, func() error {
+		if err := writeConfig(e, remaining, m, false, o); err != nil {
 			return err
-		}
-		for p, b := range plain {
-			abs := filepath.Join(e.Root, filepath.FromSlash(p))
-			st, err := os.Stat(abs)
-			if err != nil {
-				return err
-			}
-			if err := os.WriteFile(abs, b, st.Mode().Perm()); err != nil {
-				return err
-			}
 		}
 		if _, err := e.Git.Run(nil, "add", "--", ".gitattributes", ".sops.yaml"); err != nil {
 			return err
 		}
-		for p := range plain {
+		for _, p := range selected {
 			attr, err := e.Git.Output("check-attr", "filter", "--", p)
 			if err != nil {
 				return err
 			}
 			if strings.HasSuffix(attr, ": sops") {
 				return fmt.Errorf("%q is still protected by another .gitattributes rule", p)
+			}
+			data, err := worktree.ReadFile(e.Root, p)
+			if err != nil {
+				return err
+			}
+			if e.Sops.IsEncrypted(p, data) {
+				plain, err := e.Sops.Decrypt(p, data)
+				if err != nil {
+					return fmt.Errorf("decrypt %q before unprotecting: %w", p, err)
+				}
+				if err := e.writeWorkFile(p, plain, 0o600); err != nil {
+					return err
+				}
 			}
 			if _, err := e.Git.Run(nil, "--literal-pathspecs", "add", "--renormalize", "--", p); err != nil {
 				return err
@@ -240,49 +226,4 @@ func Unprotect(o Options) error {
 		return err
 	}
 	return commitChanges(e, o, "unprotect", removed, nil)
-}
-
-func filesToChange(files map[string][]byte) []string {
-	var out []string
-	for p := range files {
-		out = append(out, p)
-	}
-	return out
-}
-
-// pathTransaction restores policy, index and touched files if staging or validation fails.
-func pathTransaction(e *Env, paths []string, work func() error) error {
-	index, err := e.Git.Output("rev-parse", "--path-format=absolute", "--git-path", "index")
-	if err != nil {
-		return err
-	}
-	paths = append(paths, ".gitattributes", ".sops.yaml")
-	paths = append(paths, index)
-	type saved struct {
-		path string
-		data []byte
-		mode os.FileMode
-	}
-	var backups []saved
-	for _, p := range paths {
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(e.Root, filepath.FromSlash(p))
-		}
-		st, err := os.Stat(p)
-		if err != nil {
-			return err
-		}
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return err
-		}
-		backups = append(backups, saved{p, b, st.Mode().Perm()})
-	}
-	if err := work(); err != nil {
-		for _, b := range backups {
-			err = errors.Join(err, os.WriteFile(b.path, b.data, b.mode))
-		}
-		return err
-	}
-	return nil
 }

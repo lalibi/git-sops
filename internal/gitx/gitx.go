@@ -19,6 +19,8 @@ type Git struct {
 	Exe string
 	// Dir is the working directory for every invocation; empty means the current directory.
 	Dir string
+	// IndexFile selects a private index while a repository operation holds Git's index lock.
+	IndexFile string
 }
 
 type ExitError struct {
@@ -43,11 +45,18 @@ func New(dir string) (*Git, error) {
 	return &Git{Exe: exe, Dir: dir}, nil
 }
 
-// Run executes git with optional stdin and returns raw stdout.
-func (g *Git) Run(stdin []byte, args ...string) ([]byte, error) {
+func (g *Git) command(args ...string) *exec.Cmd {
 	cmd := exec.Command(g.Exe, args...)
 	cmd.Dir = g.Dir
+	if g.IndexFile != "" {
+		cmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+g.IndexFile)
+	}
+	return cmd
+}
 
+// Run executes git with optional stdin and returns raw stdout.
+func (g *Git) Run(stdin []byte, args ...string) ([]byte, error) {
+	cmd := g.command(args...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -78,8 +87,7 @@ func (g *Git) Output(args ...string) (string, error) {
 
 // Passthrough runs git with stdout/stderr attached to this process and returns its exit error, if any.
 func (g *Git) Passthrough(args ...string) error {
-	cmd := exec.Command(g.Exe, args...)
-	cmd.Dir = g.Dir
+	cmd := g.command(args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -112,22 +120,49 @@ func (g *Git) ZList(args ...string) ([]string, error) {
 
 // TrackedFilterPaths returns paths whose effective filter in the index matches keep.
 func (g *Git) TrackedFilterPaths(keep func(string) bool) ([]string, error) {
-	files, err := g.Run(nil, "ls-files", "-z")
-	if err != nil || len(files) == 0 {
-		return nil, err
-	}
-	out, err := g.Run(files, "check-attr", "--cached", "-z", "--stdin", "filter")
+	files, err := g.ZList("ls-files", "-z")
 	if err != nil {
 		return nil, err
 	}
-	fields := strings.Split(string(out), "\x00")
+	attrs, err := g.FilterAttributes(files, true)
+	if err != nil {
+		return nil, err
+	}
 	var paths []string
-	for i := 0; i+2 < len(fields); i += 3 {
-		if keep(fields[i+2]) {
-			paths = append(paths, fields[i])
+	for _, path := range files {
+		if keep(attrs[path]) {
+			paths = append(paths, path)
 		}
 	}
 	return paths, nil
+}
+
+// FilterAttributes reads each path's effective filter in one Git call. Use the
+// working attributes before git add and the cached attributes to audit an index.
+func (g *Git) FilterAttributes(paths []string, cached bool) (map[string]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	args := []string{"check-attr"}
+	if cached {
+		args = append(args, "--cached")
+	}
+	out, err := g.Run([]byte(strings.Join(paths, "\x00")+"\x00"), append(args, "-z", "--stdin", "filter")...)
+	if err != nil {
+		return nil, err
+	}
+	fields := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+	if len(fields) != 3*len(paths) {
+		return nil, errors.New("incomplete filter attributes from Git")
+	}
+	attrs := make(map[string]string, len(paths))
+	for i, path := range paths {
+		if fields[i*3] != path || fields[i*3+1] != "filter" {
+			return nil, errors.New("unexpected filter attribute response from Git")
+		}
+		attrs[path] = fields[i*3+2]
+	}
+	return attrs, nil
 }
 
 var versionPattern = regexp.MustCompile(`(\d+)\.(\d+)(?:\.(\d+))?`)

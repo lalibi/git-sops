@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/lalibi/git-sops/internal/agekey"
@@ -38,8 +39,12 @@ func Run(repoPath string) error {
 	ui.Section("Environment")
 
 	g, sopsExe := environment(r)
-	id, _ := agekey.Load()
-	identity(r, id)
+	id, err := agekey.Load()
+	if err != nil {
+		r.row(ui.StatusFail, "age identity", "could not load key file", err.Error())
+	} else {
+		identity(r, id)
+	}
 
 	if g != nil {
 		if root, err := gitx.ToplevelOf(g.Exe, repoPath); err == nil {
@@ -103,7 +108,7 @@ func repository(r *report, g *gitx.Git, sopsExe, root string, id *agekey.Identit
 	data, err := os.ReadFile(filepath.Join(root, ".sops.yaml"))
 	var managed *config.Managed
 	if err == nil {
-		managed = config.ParseManaged(data)
+		managed, err = config.ParseManaged(data)
 	}
 	clean, _ := g.Output("config", "--local", "--get", "filter.sops.clean")
 
@@ -121,8 +126,12 @@ func repository(r *report, g *gitx.Git, sopsExe, root string, id *agekey.Identit
 		r.row(ui.StatusWarn, ".sops.yaml", "no git-sops management header",
 			"For a custom policy, manage creation rules and recipients in .sops.yaml. The recipient check was skipped.")
 	default:
+		count := fmt.Sprintf("%d recipient(s)", len(managed.Recipients))
+		if managed.Groups != nil {
+			count = fmt.Sprintf("%d recipient group(s)", len(managed.Groups))
+		}
 		r.row(ui.StatusOK, ".sops.yaml",
-			fmt.Sprintf("%d recipient(s)", len(managed.Recipients)),
+			count,
 			"protects: "+strings.Join(managed.ProtectedPaths, ", "))
 	}
 
@@ -130,7 +139,24 @@ func repository(r *report, g *gitx.Git, sopsExe, root string, id *agekey.Identit
 	hookConfig(r, g)
 
 	if id != nil && managed != nil {
-		authorized(r, id, managed)
+		if managed.Groups == nil {
+			authorized(r, id, managed)
+		} else {
+			n := 0
+			for _, rule := range managed.ProtectedPaths {
+				if slices.Contains(managed.KeysFor(rule), id.Recipient) {
+					n++
+				}
+			}
+			r.row(ui.StatusInfo, "Access", fmt.Sprintf("this identity is listed for %d of %d rules", n, len(managed.ProtectedPaths)), "Use git-sops access "+id.Recipient+" to list effective paths.")
+		}
+	}
+	if managed != nil {
+		for _, group := range managed.GroupNames() {
+			if len(managed.Groups[group]) == 1 {
+				r.row(ui.StatusWarn, "Recovery", "group "+group+" has one recipient", "Add a second maintainer or an offline recovery recipient to this group if required.")
+			}
+		}
 	}
 
 	if sopsExe != "" {
@@ -201,7 +227,7 @@ func indexCheck(r *report, g *gitx.Git, sopsExe string) {
 	case checked == 0:
 		r.row(ui.StatusInfo, "Index", "no protected files tracked yet")
 	default:
-		r.row(ui.StatusOK, "Index", fmt.Sprintf("%d protected file(s), all ciphertext", checked))
+		r.row(ui.StatusOK, "Index", fmt.Sprintf("%d protected file(s) have SOPS metadata", checked))
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 )
 
 func TestCommitFlagsAreLimitedToRepositoryChangeCommands(t *testing.T) {
+	const publicKey = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"
 	for _, name := range []string{"init", "protect", "unprotect", "add-recipient", "remove-recipient", "migrate-git-crypt"} {
 		cmd, _, err := newRootCommand().Find([]string{name})
 		if err != nil {
@@ -30,8 +31,8 @@ func TestCommitFlagsAreLimitedToRepositoryChangeCommands(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		{"init", "--commit", "--no-stage"},
-		{"add-recipient", "age1test", "--commit", "--no-stage"},
-		{"remove-recipient", "age1test", "--commit", "--no-stage"},
+		{"add-recipient", publicKey, "--commit", "--no-stage"},
+		{"remove-recipient", publicKey, "--commit", "--no-stage"},
 		{"migrate-git-crypt", "--commit", "--no-stage"},
 		{"protect", "file.txt", "--message", "custom"},
 		{"unprotect", "file.txt", "--commit", "--message", ""},
@@ -126,7 +127,8 @@ func TestCommitRequiresCleanTrackedStateBeforeMutation(t *testing.T) {
 	policy := read(t, filepath.Join(repo, ".sops.yaml"))
 	attrs := read(t, filepath.Join(repo, ".gitattributes"))
 	index := s.git(repo, "write-tree")
-	for _, args := range [][]string{{"init"}, {"protect", "extra.txt"}, {"unprotect", "secrets/"}, {"add-recipient", "age1test"}, {"remove-recipient", "age1test"}, {"migrate-git-crypt"}} {
+	key := recipientIn(t, policy)
+	for _, args := range [][]string{{"init"}, {"protect", "extra.txt"}, {"unprotect", "secrets/"}, {"add-recipient", key}, {"remove-recipient", key}, {"migrate-git-crypt"}} {
 		r := s.gitSops(repo, append(args, "--commit")...)
 		if r.code == 0 || !strings.Contains(r.out, "uncommitted changes") {
 			t.Fatalf("dirty index accepted by %v: %+v", args, r)
@@ -192,6 +194,37 @@ func TestCommitFailureKeepsPreparedChanges(t *testing.T) {
 				t.Fatal("prepared policy was rolled back after commit failed")
 			}
 		})
+	}
+}
+
+func TestMigrationRequiresUnlockedGitCryptFiles(t *testing.T) {
+	if _, err := exec.LookPath("git-crypt"); err != nil {
+		t.Skip("requires git-crypt")
+	}
+	s := newSandbox(t)
+	base := t.TempDir()
+	repo := filepath.Join(base, "unlocked")
+	s.git(base, "init", repo)
+	if r := s.run(repo, "git-crypt", "init"); r.code != 0 {
+		t.Fatalf("git-crypt init: %s", r.out)
+	}
+	write(t, filepath.Join(repo, ".gitattributes"), "/sample.txt filter=git-crypt diff=git-crypt\n")
+	write(t, filepath.Join(repo, "sample.txt"), "migration example\n")
+	s.git(repo, "add", ".")
+	s.git(repo, "commit", "-m", "git-crypt fixture")
+	locked := filepath.Join(base, "locked")
+	s.git(base, "clone", repo, locked)
+	tree := s.git(locked, "write-tree")
+	if r := s.gitSops(locked, "migrate-git-crypt", "--yes"); r.code == 0 {
+		t.Fatal("accepted a locked working copy")
+	}
+	if s.git(locked, "write-tree") != tree || s.git(locked, "status", "--porcelain") != "" {
+		t.Fatal("refused migration changed the locked checkout")
+	}
+	s.mustGitSops(repo, "migrate-git-crypt", "--yes", "--commit")
+	s.mustGitSops(repo, "verify")
+	if got := read(t, filepath.Join(repo, "sample.txt")); got != "migration example\n" {
+		t.Fatal("unlocked migration changed working contents")
 	}
 }
 

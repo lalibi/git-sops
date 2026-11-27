@@ -1,0 +1,49 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"filippo.io/age"
+)
+
+func TestGroupedPolicyRejectsAmbiguousOrIncompleteRules(t *testing.T) {
+	root := t.TempDir()
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{id.Recipient().String()}
+	m := &Managed{Groups: map[string][]string{DefaultGroup: keys, "production": keys}, Assignments: map[string]string{"secrets/prod.env": "production"}}
+	specs, err := BuildSpecs(root, []string{"secrets/", "secrets/prod.env"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteManagedConfig(root, specs, m, false, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".sops.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, rules, ok := strings.Cut(string(data), "creation_rules:\n")
+	first, second, split := strings.Cut(rules, "\n\n")
+	if !ok || !split {
+		t.Fatal("expected two group rules")
+	}
+	for _, invalid := range []string{
+		head + "creation_rules:\n" + strings.TrimSuffix(second, "\n") + "\n\n" + first + "\n",
+		head + "creation_rules:\n" + first + "\n",
+		strings.Replace(string(data), "age: *production", "age: *missing", 1),
+		strings.Replace(string(data), "age: *production", "age: *production\n    pgp: another-key", 1),
+	} {
+		if _, err := ParseManaged([]byte(invalid)); err == nil {
+			t.Fatalf("accepted invalid grouped policy: %s", invalid)
+		}
+	}
+	if err := WriteSopsConfig(root, specs, keys, true, t.Logf); err == nil {
+		t.Fatal("grouped access was flattened")
+	}
+}

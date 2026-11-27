@@ -3,20 +3,15 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
 
-	"github.com/spf13/cobra"
-
-	"github.com/lalibi/git-sops/internal/agekey"
 	"github.com/lalibi/git-sops/internal/check"
-	"github.com/lalibi/git-sops/internal/filter"
-	"github.com/lalibi/git-sops/internal/gitx"
 	"github.com/lalibi/git-sops/internal/setup"
 	"github.com/lalibi/git-sops/internal/sopsx"
 	"github.com/lalibi/git-sops/internal/ui"
+	"github.com/spf13/cobra"
 )
 
 // Set by the release build.
@@ -65,6 +60,8 @@ func newRootCommand() *cobra.Command {
 		newJoinCommand(&opts),
 		newAddRecipientCommand(&opts),
 		newRemoveRecipientCommand(&opts),
+		newGroupCommand(&opts),
+		newAccessCommand(&opts),
 		newMigrateCommand(&opts),
 		newCheckCommand(&opts),
 		newStatusCommand(&opts),
@@ -74,7 +71,7 @@ func newRootCommand() *cobra.Command {
 		newFilterCommand("smudge"),
 		newTextconvCommand(),
 		newMergeCommand(),
-		newVerifyCommand(),
+		newVerifyCommand(&opts),
 	)
 	return root
 }
@@ -131,6 +128,10 @@ func newPathCommand(base *setup.Options, remove bool) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringSliceVar(&paths, "protect", nil, "paths (comma-separated or repeatable); positional paths are also accepted")
+	if !remove {
+		cmd.Flags().StringVar(&base.Group, "group", "", "assign these paths to a named recipient group")
+		cmd.Flags().BoolVar(&base.DryRun, "dry-run", false, "preview the paths affected by the assignment")
+	}
 	addCommitFlags(cmd, base)
 	return cmd
 }
@@ -174,6 +175,8 @@ func newAddRecipientCommand(o *setup.Options) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "age public recipient (repeatable)")
+	cmd.Flags().StringVar(&o.Group, "group", "", "recipient group (defaults to default)")
+	cmd.Flags().BoolVar(&o.DryRun, "dry-run", false, "show affected rules and files without applying")
 	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage .sops.yaml")
 	addCommitFlags(cmd, o)
 	return cmd
@@ -190,6 +193,10 @@ func newRemoveRecipientCommand(o *setup.Options) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "age public recipient to remove (repeatable)")
+	cmd.Flags().StringVar(&o.Group, "group", "", "recipient group (defaults to default)")
+	cmd.Flags().BoolVar(&o.Everywhere, "everywhere", false, "revoke the recipient from every group")
+	cmd.MarkFlagsMutuallyExclusive("group", "everywhere")
+	cmd.Flags().BoolVar(&o.DryRun, "dry-run", false, "show affected rules and files without applying")
 	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage .sops.yaml")
 	addCommitFlags(cmd, o)
 	return cmd
@@ -257,161 +264,4 @@ func newInstallSopsCommand() *cobra.Command {
 	cmd.Flags().StringVar(&sopsVersion, "sops-version", sopsx.DefaultVersion, "SOPS release to install")
 	cmd.Flags().BoolVar(&force, "force", false, "download even when SOPS is already available")
 	return cmd
-}
-
-func newFilterCommand(mode string) *cobra.Command {
-	return &cobra.Command{
-		Use:    mode + " <path>",
-		Short:  "Git " + mode + " filter (invoked by Git)",
-		Args:   cobra.ExactArgs(1),
-		Hidden: true,
-		RunE: func(_ *cobra.Command, args []string) error {
-			return runFilter(mode, args[0])
-		},
-	}
-}
-
-func runFilter(mode, path string) error {
-	sopsExe, err := sopsx.Find()
-	if err != nil {
-		return err
-	}
-	keyFile, _ := agekey.KeyFile()
-	client := &sopsx.Client{Exe: sopsExe, KeyFile: keyFile}
-
-	input, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		return err
-	}
-
-	var out []byte
-	if mode == "smudge" {
-		out, err = filter.Smudge(client, path, input)
-	} else {
-		g, gerr := gitx.New("")
-		if gerr != nil {
-			return gerr
-		}
-		out, err = filter.Clean(g, client, path, input)
-	}
-	if err != nil {
-		return err
-	}
-
-	_, err = os.Stdout.Write(out)
-	return err
-}
-
-func sopsClient() (*sopsx.Client, error) {
-	sopsExe, err := sopsx.Find()
-	if err != nil {
-		return nil, err
-	}
-	keyFile, _ := agekey.KeyFile()
-	return &sopsx.Client{Exe: sopsExe, KeyFile: keyFile}, nil
-}
-
-func newTextconvCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:    "textconv <file>",
-		Short:  "Git diff textconv driver: print the decrypted content of a blob (invoked by Git)",
-		Args:   cobra.ExactArgs(1),
-		Hidden: true,
-		RunE: func(_ *cobra.Command, args []string) error {
-			client, err := sopsClient()
-			if err != nil {
-				return err
-			}
-
-			// Git passes a temporary file named <random>_<original name>, so the extension is kept.
-			input, err := os.ReadFile(args[0])
-			if err != nil {
-				return err
-			}
-			_, err = os.Stdout.Write(filter.TextConv(client, args[0], input))
-			return err
-		},
-	}
-}
-
-func newMergeCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:    "merge <base> <ours> <theirs> <path> [marker-size]",
-		Short:  "Git merge driver: three-way merge of encrypted files (invoked by Git)",
-		Args:   cobra.RangeArgs(4, 5),
-		Hidden: true,
-		RunE: func(_ *cobra.Command, args []string) error {
-			client, err := sopsClient()
-			if err != nil {
-				return err
-			}
-			g, err := gitx.New("")
-			if err != nil {
-				return err
-			}
-
-			basePath, oursPath, theirsPath, path := args[0], args[1], args[2], args[3]
-			markerSize := ""
-			if len(args) == 5 {
-				markerSize = args[4]
-			}
-
-			var blobs [3][]byte
-			for i, p := range []string{basePath, oursPath, theirsPath} {
-				if blobs[i], err = os.ReadFile(p); err != nil {
-					return err
-				}
-			}
-
-			out, conflicted, err := filter.Merge(g, client, path, blobs[0], blobs[1], blobs[2], markerSize)
-			if err != nil {
-				return err
-			}
-
-			// Git takes the result from the 'ours' file; a non-zero exit marks it as conflicted.
-			if err := os.WriteFile(oursPath, out, 0o600); err != nil {
-				return err
-			}
-			if conflicted {
-				return &setup.ExitCodeError{Code: 1, Message: "git-sops: merge conflict in " + path + "; resolve the markers in the working tree, then git add it"}
-			}
-			return nil
-		},
-	}
-}
-
-func newVerifyCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "verify",
-		Short: "Fail when a protected file in the Git index is not SOPS ciphertext (pre-commit)",
-		Args:  cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
-			g, err := gitx.New("")
-			if err != nil {
-				return err
-			}
-			sopsExe, err := sopsx.Find()
-			if err != nil {
-				return err
-			}
-			keyFile, _ := agekey.KeyFile()
-
-			_, failures, err := filter.VerifyIndex(g, &sopsx.Client{Exe: sopsExe, KeyFile: keyFile})
-			if err != nil {
-				return err
-			}
-
-			if len(failures) > 0 {
-				msg := "\nERROR: plaintext or invalid SOPS data found in the Git index:\n"
-				for _, f := range failures {
-					msg += "  - " + f + "\n"
-				}
-				msg += "\nCommit aborted to prevent plaintext secrets from being committed."
-				return &setup.ExitCodeError{Code: 1, Message: msg}
-			}
-
-			fmt.Println("SOPS index validation passed.")
-			return nil
-		},
-	}
 }
