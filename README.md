@@ -64,6 +64,14 @@ Structured SOPS files expose field names. Paths, commit messages, public recipie
 
 ## Build and test
 
+For a local development build, run the PowerShell script:
+
+```powershell
+./scripts/build.ps1
+```
+
+The executable is written to `bin/git-sops.exe` on Windows or `bin/git-sops` on Linux and macOS. To build and test with Go directly:
+
 ```sh
 go build -o bin/ ./cmd/git-sops
 go vet ./...
