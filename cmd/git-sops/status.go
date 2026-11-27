@@ -60,14 +60,9 @@ func newStatusCommand(o *setup.Options) *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "No tracked files in the index.")
 				return nil
 			}
-			attrs, err := g.Run([]byte(strings.Join(files, "\x00")+"\x00"), "check-attr", "--cached", "-z", "--stdin", "filter")
+			attrs, err := g.FilterAttributes(files, true)
 			if err != nil {
 				return err
-			}
-			protected := map[string]bool{}
-			fields := strings.Split(string(attrs), "\x00")
-			for i := 0; i+2 < len(fields); i += 3 {
-				protected[fields[i]] = fields[i+2] == "sops"
 			}
 			exe, err := sopsx.Find()
 			if err != nil {
@@ -78,7 +73,8 @@ func newStatusCommand(o *setup.Options) *cobra.Command {
 			protectedCount, issues := 0, 0
 			for _, path := range files {
 				protection, state := "unprotected", "unmerged (!)"
-				if protected[path] {
+				protected := attrs[path] == "sops"
+				if protected {
 					protection = "protected"
 					protectedCount++
 				}
@@ -87,11 +83,11 @@ func newStatusCommand(o *setup.Options) *cobra.Command {
 					problem = true
 				} else if submodules[path] {
 					state = "submodule"
-					if protected[path] {
+					if protected {
 						state = "submodule (!)"
 						problem = true
 					}
-				} else {
+				} else if protected || !onlyProtected {
 					blob, err := g.Run(nil, "cat-file", "blob", ":"+path)
 					if err != nil {
 						return err
@@ -100,7 +96,7 @@ func newStatusCommand(o *setup.Options) *cobra.Command {
 					state = "plaintext"
 					if encrypted {
 						state = "encrypted"
-					} else if protected[path] {
+					} else if protected {
 						state = "plaintext (!)"
 						problem = true
 					}
@@ -108,7 +104,7 @@ func newStatusCommand(o *setup.Options) *cobra.Command {
 				if problem {
 					issues++
 				}
-				if onlyProtected && !protected[path] || onlyUnprotected && protected[path] {
+				if onlyProtected && !protected || onlyUnprotected && protected {
 					continue
 				}
 				label := path
