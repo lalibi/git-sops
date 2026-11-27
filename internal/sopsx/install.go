@@ -1,10 +1,9 @@
 package sopsx
 
 import (
-	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lalibi/git-sops/internal/ghrelease"
 	"github.com/lalibi/git-sops/internal/ui"
 )
 
@@ -45,62 +45,7 @@ func assetName(version string) (string, error) {
 	}
 }
 
-func firstEnv(keys ...string) string {
-	for _, k := range keys {
-		if v := os.Getenv(k); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-type asset struct {
-	Name   string `json:"name"`
-	URL    string `json:"browser_download_url"`
-	Digest string `json:"digest"`
-	Size   int64  `json:"size"`
-}
-
-type release struct {
-	Assets []asset `json:"assets"`
-}
-
-func fetchRelease(client *http.Client, version string) (*release, error) {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/getsops/sops/releases/tags/v%s", version)
-
-	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "git-sops")
-	req.Header.Set("Accept", "application/vnd.github+json")
-	// Unauthenticated API calls are rate-limited per IP, which shared CI runners exhaust.
-	if token := firstEnv("GITHUB_TOKEN", "GH_TOKEN"); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("sops v%s was not found on GitHub", version)
-	}
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("release lookup failed: %s (likely GitHub API rate limit; set GITHUB_TOKEN and retry)", resp.Status)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("release lookup failed: %s", resp.Status)
-	}
-
-	var r release
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&r); err != nil {
-		return nil, err
-	}
-	return &r, nil
-}
+type asset = ghrelease.Asset
 
 // Install downloads the sops release into InstallDir and returns the executable path.
 // It requires a SHA-256 from the release API or the upstream checksum manifest.
@@ -121,7 +66,7 @@ func Install(version string) (string, error) {
 	client := &http.Client{Timeout: 5 * time.Minute}
 
 	spin := ui.Spin(fmt.Sprintf("Looking up sops v%s", version))
-	rel, err := fetchRelease(client, version)
+	rel, err := ghrelease.Lookup(context.Background(), client, "getsops/sops", "tags/v"+version)
 	if err != nil {
 		spin.Fail("Looking up sops v%s", version)
 		return "", err
@@ -190,19 +135,6 @@ func expectedDigest(client *http.Client, version string, binary, manifest asset)
 }
 
 func installAsset(client *http.Client, dir string, binary asset, want []byte) (string, error) {
-	if binary.Size <= 0 {
-		return "", fmt.Errorf("invalid release asset size for %s", binary.Name)
-	}
-	resp, err := client.Get(binary.URL)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed: %s", resp.Status)
-	}
-
 	// Write beside the destination so the final rename stays on one volume.
 	tmp, err := os.CreateTemp(dir, "sops-download-*")
 	if err != nil {
@@ -211,24 +143,13 @@ func installAsset(client *http.Client, dir string, binary asset, want []byte) (s
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 
-	bar := ui.NewProgress("Downloading "+binary.Name, binary.Size, true)
-	hasher := sha256.New()
-
-	n, err := io.Copy(io.MultiWriter(tmp, hasher, bar), io.LimitReader(resp.Body, binary.Size+1))
-	if err != nil {
-		bar.Abort()
+	if err := binary.Download(context.Background(), client, tmp, want); err != nil {
 		tmp.Close()
 		return "", err
 	}
 	if err := tmp.Close(); err != nil {
-		bar.Abort()
 		return "", err
 	}
-	if n != binary.Size || !bytes.Equal(hasher.Sum(nil), want) {
-		bar.Abort()
-		return "", fmt.Errorf("size or SHA-256 verification failed for %s", binary.Name)
-	}
-	bar.Finish("Verified %s", binary.Name)
 
 	if err := os.Chmod(tmpName, 0o755); err != nil {
 		return "", err

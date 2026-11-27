@@ -10,6 +10,8 @@ Download a binary for your platform from the [releases page](https://github.com/
 go install github.com/lalibi/git-sops/cmd/git-sops@latest
 ```
 
+Run `git-sops update` from any directory to install the latest stable GitHub release at the path of the running executable. The updater verifies the archive's SHA-256 before replacing the binary. It skips the download when your installed version is equal to or newer than the release. An unversioned build can update directly to the stable release. On Windows the previous executable stays beside the new one as `<executable>.git-sops-old`.
+
 You need Git 2.55 or newer for config-based hooks, and a SOPS executable. If you manage SOPS separately, put it on your `PATH`. Otherwise run `git-sops install-sops`. Use `git-sops check` to see which executable and age identity this clone uses.
 
 ## Protect your first file
