@@ -6,10 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"os/user"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -73,10 +70,36 @@ func Load() (*Identity, error) {
 
 	id, err := age.ParseX25519Identity(secrets[0])
 	if err != nil {
-		return nil, fmt.Errorf("could not parse the age identity in '%s': %w", path, err)
+		return nil, fmt.Errorf("invalid age identity in %q", path)
 	}
 
 	return &Identity{KeyFile: path, Recipient: id.Recipient().String()}, nil
+}
+
+// LocalRecipients includes all native age identities SOPS can load from its key file or environment.
+func LocalRecipients() ([]string, error) {
+	path, err := KeyFile()
+	if err != nil {
+		return nil, err
+	}
+	lines, err := readSecretLines(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	lines = append(lines, strings.Split(os.Getenv("SOPS_AGE_KEY"), "\n")...)
+	var keys []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, secretPrefix) {
+			continue
+		}
+		id, err := age.ParseX25519Identity(line)
+		if err != nil {
+			return nil, errors.New("invalid local age identity")
+		}
+		keys = append(keys, id.Recipient().String())
+	}
+	return keys, nil
 }
 
 // Generate creates a new identity file. It refuses to touch an existing file.
@@ -95,22 +118,18 @@ func Generate() (*Identity, error) {
 		return nil, err
 	}
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := openPrivate(path, true)
 	if err != nil {
 		return nil, err
 	}
 
 	content := fmt.Sprintf("# created: %s\n# public key: %s\n%s\n",
 		time.Now().Format(time.RFC3339), id.Recipient(), id)
-	if _, err := f.WriteString(content); err != nil {
-		f.Close()
-		return nil, err
-	}
-	if err := f.Close(); err != nil {
-		return nil, err
+	_, writeErr := f.WriteString(content)
+	if err := errors.Join(writeErr, f.Close()); err != nil {
+		return nil, errors.Join(err, os.Remove(path))
 	}
 
-	Protect(path)
 	return &Identity{KeyFile: path, Recipient: id.Recipient().String()}, nil
 }
 
@@ -141,38 +160,20 @@ func Import(source string) error {
 		have[s] = true
 	}
 
-	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	var additions strings.Builder
+	for _, s := range secrets {
+		if _, err := age.ParseX25519Identity(s); err != nil {
+			return fmt.Errorf("invalid age identity in %q", source)
+		}
+		if !have[s] {
+			fmt.Fprintf(&additions, "\n%s\n", s)
+			have[s] = true
+		}
+	}
+	f, err := openPrivate(dest, false)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-
-	for _, s := range secrets {
-		if !have[s] {
-			if _, err := fmt.Fprintf(f, "\n%s\n", s); err != nil {
-				return err
-			}
-		}
-	}
-
-	Protect(dest)
-	return nil
-}
-
-// Protect restricts the key file to the current user.
-func Protect(path string) {
-	if runtime.GOOS != "windows" {
-		_ = os.Chmod(path, 0o600)
-		return
-	}
-
-	u, err := user.Current()
-	if err != nil {
-		return
-	}
-
-	// Best effort: a failure leaves the inherited ACL in place.
-	if exec.Command("icacls.exe", path, "/inheritance:r").Run() == nil {
-		_ = exec.Command("icacls.exe", path, "/grant:r", u.Username+":(F)").Run()
-	}
+	_, writeErr := f.WriteString(additions.String())
+	return errors.Join(writeErr, f.Close())
 }
