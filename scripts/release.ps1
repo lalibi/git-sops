@@ -69,7 +69,16 @@ function Format-ReleaseJobs($Snapshot) {
         }
     }
     $rows = @([pscustomobject]$summary) + @($steps.Values | Sort-Object Number, Step)
-    $rows | Format-SpectreTable -Property Step,Linux,Windows,macOS -Title ($title -join '   ') -AllowMarkup -Border Rounded -Color Grey -HeaderColor Cyan
+    $table = $rows | Format-SpectreTable -Property Step,Linux,Windows,macOS -Title ($title -join '   ') -AllowMarkup -Border Rounded -Color Grey -HeaderColor Cyan
+    foreach ($column in $table.Columns) {
+        $column.Header.Justification = 'Center'
+    }
+    foreach ($i in 1..3) {
+        foreach ($row in $table.Rows) {
+            $row[$i].Justification = 'Right'
+        }
+    }
+    return $table
 }
 
 function Watch-ReleaseJobs($Repo, $Run, $Tag) {
@@ -86,6 +95,7 @@ function Watch-ReleaseJobs($Repo, $Run, $Tag) {
                     $Context.UpdateTarget($table)
                     $Context.Refresh()
                 } else {
+                    Write-Host
                     $table | Out-SpectreHost
                 }
                 $previous = $json
@@ -100,6 +110,7 @@ function Watch-ReleaseJobs($Repo, $Run, $Tag) {
     if ([Console]::IsOutputRedirected -or !$Host.UI.SupportsVirtualTerminal) {
         & $poll
     } else {
+        Write-Host
         Invoke-SpectreLive -Data ([Spectre.Console.Markup]::new('Loading workflow jobs…')) -ScriptBlock $poll
     }
 }
@@ -107,6 +118,7 @@ function Watch-ReleaseJobs($Repo, $Run, $Tag) {
 function Wait-Release($Repo, $Tag, $Commit) {
     $filters = @('--workflow', 'release.yml', '--event', 'push', '--branch', $Tag)
     if ($Commit) { $filters += '--commit', $Commit }
+    Write-Host
     Write-SpectreHost "[grey]Waiting for the release workflow for $Tag...[/]"
     $deadline = [DateTime]::UtcNow.AddMinutes(3)
     do {
@@ -136,6 +148,7 @@ function Wait-Release($Repo, $Tag, $Commit) {
             $uploaded = @($release.assets | Where-Object { $_.state -eq 'uploaded' -and $_.size -gt 0 } | ForEach-Object name)
             $missing = @($expected | Where-Object { $_ -cnotin $uploaded })
             if ($release.tagName -ceq $Tag -and !$release.isDraft -and !$missing.Count) {
+                Write-Host
                 Write-Host "Release available: $($release.url)"
                 return
             }
@@ -199,9 +212,14 @@ $rows = @(for ($i = 0; $i + 2 -lt $fields.Count; $i += 3) {
 })
 
 $title = if ($Publish) { 'Publish release' } else { 'Release preview' }
+Write-Host
 Write-SpectreRule -Title $title -Color Cyan
 if ($rows.Count) {
-    $rows | Format-SpectreTable -Border Rounded -Color Grey -HeaderColor Cyan | Out-SpectreHost
+    $table = $rows | Format-SpectreTable -Border Rounded -Color Grey -HeaderColor Cyan
+    foreach ($column in $table.Columns) {
+        $column.Header.Justification = 'Center'
+    }
+    $table | Out-SpectreHost
 }
 
 $bump = 'major', 'minor', 'patch' | Where-Object { $_ -in $rows.Impact } | Select-Object -First 1
