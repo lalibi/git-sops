@@ -125,17 +125,25 @@ func TestUnprotectRollsBackWhenOtherAttributesStillProtectFile(t *testing.T) {
 	repo := protectedRepo(t, s)
 	s.git(repo, "commit", "-m", "protect secrets")
 	attrs := filepath.Join(repo, ".gitattributes")
-	write(t, attrs, read(t, attrs)+"/secrets/** filter=sops\n")
+	// The conflict is on the second tracked file. Reject the whole operation
+	// before Git can write a plaintext object for the first one.
+	write(t, attrs, read(t, attrs)+"/secrets/token.txt filter=sops\n")
 	s.git(repo, "add", ".gitattributes")
 	s.git(repo, "commit", "-m", "extra unmanaged rule")
 	before := read(t, attrs)
+	policy := filepath.Join(repo, ".sops.yaml")
+	beforePolicy := read(t, policy)
 	index := s.git(repo, "write-tree")
+	plain := strings.TrimSpace(s.git(repo, "hash-object", "--no-filters", "secrets/db.json"))
 	r := s.gitSops(repo, "unprotect", "secrets/")
 	if r.code == 0 || !strings.Contains(r.out, "still protected") {
 		t.Fatalf("expected rejection: %+v", r)
 	}
-	if read(t, attrs) != before || s.git(repo, "write-tree") != index {
+	if read(t, attrs) != before || read(t, policy) != beforePolicy || s.git(repo, "write-tree") != index {
 		t.Fatal("failed unprotect was not rolled back")
+	}
+	if s.run(repo, "git", "cat-file", "-e", plain).code == 0 {
+		t.Fatal("failed unprotect wrote plaintext to the object database")
 	}
 }
 

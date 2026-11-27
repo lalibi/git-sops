@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/lalibi/git-sops/internal/config"
 	"github.com/lalibi/git-sops/internal/ui"
@@ -192,17 +191,21 @@ func Unprotect(o Options) error {
 		if err := writeConfig(e, remaining, m, false, o); err != nil {
 			return err
 		}
+		// Even staging just the policy can refresh index entries and run clean filters.
+		// Check every removed path against the new working attributes first.
+		attrs, err := e.Git.FilterAttributes(selected, false)
+		if err != nil {
+			return err
+		}
+		for _, p := range selected {
+			if attrs[p] == "sops" {
+				return fmt.Errorf("%q is still protected by another .gitattributes rule", p)
+			}
+		}
 		if _, err := e.Git.Run(nil, "add", "--", ".gitattributes", ".sops.yaml"); err != nil {
 			return err
 		}
 		for _, p := range selected {
-			attr, err := e.Git.Output("check-attr", "filter", "--", p)
-			if err != nil {
-				return err
-			}
-			if strings.HasSuffix(attr, ": sops") {
-				return fmt.Errorf("%q is still protected by another .gitattributes rule", p)
-			}
 			data, err := worktree.ReadFile(e.Root, p)
 			if err != nil {
 				return err
