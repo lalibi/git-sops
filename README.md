@@ -4,7 +4,7 @@ Edit a secret as an ordinary file. When you run `git add`, Git sends it through 
 
 ## Install
 
-Download a binary for your platform from the [releases page](https://github.com/lalibi/git-sops/releases), or build the latest published version with Go 1.27 or newer.
+Download a binary for your platform from the [releases page](https://github.com/lalibi/git-sops/releases), or build from source with Go 1.27.4 or newer.
 
 ```sh
 go install github.com/lalibi/git-sops/cmd/git-sops@latest
