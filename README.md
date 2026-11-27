@@ -14,6 +14,20 @@ Run `git-sops update` from any directory to install the latest stable GitHub rel
 
 You need Git 2.55 or newer for config-based hooks, and a SOPS executable. If you manage SOPS separately, put it on your `PATH`. Otherwise run `git-sops install-sops`. Use `git-sops check` to see which executable and age identity this clone uses.
 
+### PowerShell completion
+
+To preview the profile block, install it in the current PowerShell host's profile, and load it in this session:
+
+```powershell
+git-sops completion powershell --show
+git-sops completion powershell --install $PROFILE
+. $PROFILE
+```
+
+The installer creates the profile if needed. It appends a loader between `# BEGIN git-sops PowerShell completion` and `# END git-sops PowerShell completion`. Repeating the install recognizes the markers and leaves the profile alone. To remove the setup, delete that block.
+
+The loader calls the installed executable by its full path and sets `gs` as its alias. Try typing `gs sta` and pressing Tab. Command and flag suggestions come from the installed CLI, and repository-specific suggestions include recipient groups, public keys and protected rules. Running `git-sops completion powershell` without options still prints the full registration script.
+
 ## Protect your first file
 
 From a Git repository containing the files you want to protect, run:

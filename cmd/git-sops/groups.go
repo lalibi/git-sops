@@ -15,6 +15,12 @@ func newGroupCommand(base *setup.Options) *cobra.Command {
 		},
 	}
 	set.Flags().BoolVar(&base.DryRun, "dry-run", false, "show affected rules and files without applying")
+	set.ValidArgsFunction = func(cmd *cobra.Command, args []string, prefix string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return completeGroups(cmd, args, prefix)
+		}
+		return completeRecipients(cmd, args, prefix)
+	}
 	addCommitFlags(set, base)
 	cmd.AddCommand(set)
 	return cmd
@@ -22,6 +28,12 @@ func newGroupCommand(base *setup.Options) *cobra.Command {
 
 func newAccessCommand(base *setup.Options) *cobra.Command {
 	return &cobra.Command{Use: "access [age1...]", Short: "List all age recipients or inspect one recipient's access", Args: cobra.MaximumNArgs(1),
+		ValidArgsFunction: func(cmd *cobra.Command, args []string, prefix string) ([]string, cobra.ShellCompDirective) {
+			if len(args) > 0 {
+				return nil, cobra.ShellCompDirectiveNoFileComp
+			}
+			return completeRecipients(cmd, args, prefix)
+		},
 		RunE: func(_ *cobra.Command, args []string) error { return setup.ShowAccess(*base, args...) },
 	}
 }

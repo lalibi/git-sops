@@ -49,10 +49,10 @@ func newRootCommand() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.CompletionOptions.DisableDefaultCmd = true
 	root.PersistentFlags().StringVarP(&opts.RepoPath, "repo", "C", ".", "path inside the target repository")
 
 	root.AddCommand(
+		newCompletionCommand(),
 		newInitCommand(&opts),
 		newPathCommand(&opts, false),
 		newPathCommand(&opts, true),
@@ -88,6 +88,7 @@ func newInitCommand(o *setup.Options) *cobra.Command {
 	}
 	cmd.Flags().StringSliceVar(&o.Protect, "protect", nil, "complete protected path set (comma-separated or repeatable); defaults to the existing set, else asks")
 	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "additional age public recipient (repeatable)")
+	cmd.RegisterFlagCompletionFunc("recipient", completeRecipients)
 	cmd.Flags().StringVar(&o.AgeKeySource, "age-key", "", "import an age identity file before initializing")
 	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage the generated changes")
 	cmd.Flags().BoolVar(&o.Force, "force", false, "replace a hand-written .sops.yaml after backing it up")
@@ -98,6 +99,7 @@ func newInitCommand(o *setup.Options) *cobra.Command {
 func addCommitFlags(cmd *cobra.Command, o *setup.Options) {
 	cmd.Flags().BoolVar(&o.Commit, "commit", false, "commit validated staged changes using normal Git hooks and signing")
 	cmd.Flags().StringVar(&o.Message, "message", "", "override the generated commit message (requires --commit)")
+	cmd.RegisterFlagCompletionFunc("message", cobra.NoFileCompletions)
 	cmd.PreRunE = func(cmd *cobra.Command, _ []string) error {
 		if cmd.Flags().Changed("message") {
 			if !o.Commit {
@@ -129,8 +131,13 @@ func newPathCommand(base *setup.Options, remove bool) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringSliceVar(&paths, "protect", nil, "paths (comma-separated or repeatable); positional paths are also accepted")
+	if remove {
+		cmd.ValidArgsFunction = completeProtectedRules
+		cmd.RegisterFlagCompletionFunc("protect", completeProtectedRules)
+	}
 	if !remove {
 		cmd.Flags().StringVar(&base.Group, "group", "", "assign these paths to a named recipient group")
+		cmd.RegisterFlagCompletionFunc("group", completeGroups)
 		cmd.Flags().BoolVar(&base.DryRun, "dry-run", false, "preview the paths affected by the assignment")
 	}
 	addCommitFlags(cmd, base)
@@ -177,7 +184,11 @@ func newAddRecipientCommand(o *setup.Options) *cobra.Command {
 	}
 	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "age public recipient (repeatable)")
 	cmd.Flags().StringVar(&o.RecipientName, "name", "", "display name for one recipient, saved in .sops.yaml")
+	cmd.RegisterFlagCompletionFunc("name", cobra.NoFileCompletions)
 	cmd.Flags().StringVar(&o.Group, "group", "", "recipient group (defaults to default)")
+	cmd.ValidArgsFunction = completeRecipients
+	cmd.RegisterFlagCompletionFunc("group", completeGroups)
+	cmd.RegisterFlagCompletionFunc("recipient", completeRecipients)
 	cmd.Flags().BoolVar(&o.DryRun, "dry-run", false, "show affected rules and files without applying")
 	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage .sops.yaml")
 	addCommitFlags(cmd, o)
@@ -196,6 +207,9 @@ func newRemoveRecipientCommand(o *setup.Options) *cobra.Command {
 	}
 	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "age public recipient to remove (repeatable)")
 	cmd.Flags().StringVar(&o.Group, "group", "", "recipient group (defaults to default)")
+	cmd.ValidArgsFunction = completeRecipients
+	cmd.RegisterFlagCompletionFunc("group", completeGroups)
+	cmd.RegisterFlagCompletionFunc("recipient", completeRecipients)
 	cmd.Flags().BoolVar(&o.Everywhere, "everywhere", false, "revoke the recipient from every group")
 	cmd.MarkFlagsMutuallyExclusive("group", "everywhere")
 	cmd.Flags().BoolVar(&o.DryRun, "dry-run", false, "show affected rules and files without applying")
@@ -213,6 +227,7 @@ func newMigrateCommand(o *setup.Options) *cobra.Command {
 	}
 	cmd.Flags().StringSliceVar(&o.Protect, "protect", nil, "file or directory to protect in addition to tracked git-crypt files (comma-separated or repeatable); defaults to secrets/")
 	cmd.Flags().StringSliceVar(&o.Recipients, "recipient", nil, "additional age public recipient (repeatable)")
+	cmd.RegisterFlagCompletionFunc("recipient", completeRecipients)
 	cmd.Flags().StringVar(&o.AgeKeySource, "age-key", "", "import an age identity file first")
 	cmd.Flags().BoolVar(&o.NoStage, "no-stage", false, "do not stage the generated changes")
 	cmd.Flags().BoolVar(&o.Force, "force", false, "replace a hand-written .sops.yaml after backing it up")
@@ -264,6 +279,7 @@ func newInstallSopsCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&sopsVersion, "sops-version", sopsx.DefaultVersion, "SOPS release to install")
+	cmd.RegisterFlagCompletionFunc("sops-version", cobra.NoFileCompletions)
 	cmd.Flags().BoolVar(&force, "force", false, "download even when SOPS is already available")
 	return cmd
 }
