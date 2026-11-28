@@ -101,10 +101,36 @@ func (m *Managed) KeysForRule(rule string) []string {
 	return m.Groups[m.GroupForRule(rule)]
 }
 
-// SOPS selects the first match. Children must precede their enclosing directories.
-func orderedSpecs(in []Spec) []Spec {
+func orderedSpecs(in []Spec, grouped bool) []Spec {
 	out := slices.Clone(in)
-	sort.SliceStable(out, func(i, j int) bool { return rulePrecedes(out[i].RelativePath, out[j].RelativePath) })
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i].policyPath(), out[j].policyPath()
+		if !grouped || a == b {
+			return a < b
+		}
+		// Grouped policies select the first match. Put children before
+		// their directory while sorting unrelated literal paths by name.
+		if !out[i].IsGlob() && !out[j].IsGlob() {
+			if out[j].IsDirectory && strings.HasPrefix(a, b) {
+				return true
+			}
+			if out[i].IsDirectory && strings.HasPrefix(b, a) {
+				return false
+			}
+			return a < b
+		}
+		if rulePrecedes(a, b) {
+			return true
+		}
+		if rulePrecedes(b, a) {
+			return false
+		}
+		// Equal-priority globs in different fixed directories are disjoint.
+		// Within the same directory they may overlap: preserve policy order.
+		dirA, _ := path.Split(a)
+		dirB, _ := path.Split(b)
+		return dirA < dirB
+	})
 	return out
 }
 

@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,13 @@ type Spec struct {
 	IsDirectory      bool
 	AttributePattern string
 	RegexPart        string
+}
+
+func (s Spec) policyPath() string {
+	if s.IsDirectory {
+		return s.RelativePath + "/"
+	}
+	return s.RelativePath
 }
 
 func IsRecipient(s string) bool { return recipientPattern.MatchString(s) }
@@ -237,6 +245,9 @@ func RenderAttributes(data []byte, specs []Spec, migrateGitCrypt bool) ([]byte, 
 		}
 	}
 
+	// Every managed line sets the same attributes. Keep the generated block
+	// stable when init reads the specs back in YAML order.
+	sort.Strings(rules)
 	out := append([]string(nil), before...)
 	// Retain the insertion point when later rules have higher precedence.
 	if len(rules) > 0 || (end >= 0 && end+1 < len(lines)) {
@@ -387,8 +398,8 @@ func WriteManagedConfig(root string, specs []Spec, m *Managed, force bool, warnf
 	marker := SopsMarker
 	if m.Groups != nil {
 		marker = GroupMarker
-		specs = orderedSpecs(specs)
 	}
+	specs = orderedSpecs(specs, m.Groups != nil)
 	lines := []string{marker}
 	// Older shared-policy readers require each key on a bare list-item line.
 	// Label its first occurrence, even when it belongs to several groups.
@@ -415,7 +426,8 @@ func WriteManagedConfig(root string, specs []Spec, m *Managed, force bool, warnf
 		lines = append(lines, "", "recipient_groups:")
 		for _, group := range m.GroupNames() {
 			lines = append(lines, "  "+group+": &"+group)
-			if err := appendRecipients("    ", m.Groups[group]); err != nil {
+			keys := slices.Sorted(slices.Values(m.Groups[group]))
+			if err := appendRecipients("    ", keys); err != nil {
 				return err
 			}
 		}
@@ -432,11 +444,7 @@ func WriteManagedConfig(root string, specs []Spec, m *Managed, force bool, warnf
 		if m.Groups != nil {
 			alias = m.GroupForRule(s.RelativePath)
 		}
-		comment := s.RelativePath
-		if s.IsDirectory {
-			comment += "/"
-		}
-		lines = append(lines, "  # protected-path: "+comment)
+		lines = append(lines, "  # protected-path: "+s.policyPath())
 		lines = append(lines, "  - path_regex: '^"+strings.ReplaceAll(s.RegexPart, "'", "''")+"$'", "    age: *"+alias)
 	}
 

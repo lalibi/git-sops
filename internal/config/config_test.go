@@ -75,7 +75,7 @@ func TestQuotedPathsRoundTripManagedPolicy(t *testing.T) {
 		t.Fatalf("single-quoted YAML path was not escaped: %s", b)
 	}
 	m, err := ReadManaged(filepath.Join(root, ".sops.yaml"))
-	if err != nil || m == nil || strings.Join(m.ProtectedPaths, ",") != "private folder/,it's-secret.txt" {
+	if err != nil || m == nil || strings.Join(m.ProtectedPaths, ",") != "it's-secret.txt,private folder/" {
 		t.Fatalf("policy round trip: %+v, %v", m, err)
 	}
 }
@@ -245,7 +245,7 @@ func TestSopsConfigRoundTrip(t *testing.T) {
 	if got := strings.Join(m.Recipients, ","); got != "age1aaa,age1bbb" {
 		t.Errorf("recipients = %s", got)
 	}
-	if got := strings.Join(m.ProtectedPaths, ","); got != "secrets/,appsettings.json" {
+	if got := strings.Join(m.ProtectedPaths, ","); got != "appsettings.json,secrets/" {
 		t.Errorf("protected paths = %s", got)
 	}
 	data, err := os.ReadFile(filepath.Join(root, ".sops.yaml"))
@@ -253,10 +253,10 @@ func TestSopsConfigRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, rules, ok := strings.Cut(string(data), "creation_rules:\n")
-	for i, path := range m.ProtectedPaths {
-		label := "  # protected-path: " + path + "\n"
-		if !ok || strings.Count(string(data), label) != 1 || !strings.Contains(rules, label+"  - path_regex: '^"+specs[i].RegexPart+"$'") {
-			t.Errorf("expected one label above the creation rule for %q", path)
+	for _, spec := range specs {
+		label := "  # protected-path: " + spec.policyPath() + "\n"
+		if !ok || strings.Count(string(data), label) != 1 || !strings.Contains(rules, label+"  - path_regex: '^"+spec.RegexPart+"$'") {
+			t.Errorf("expected one label above the creation rule for %q", spec.RelativePath)
 		}
 	}
 }

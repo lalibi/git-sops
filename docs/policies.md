@@ -82,7 +82,7 @@ Both drivers are configured by `git-sops init` and `git-sops join`. Existing rep
 
 Both must agree.
 
-git-sops writes one creation rule per protected path. Each rule references the same list of public age recipients:
+In a shared policy, git-sops sorts creation rules alphabetically by protected path. Each rule references the same list of public age recipients:
 
 ```yaml
 # Managed by git-sops (v2)
@@ -91,12 +91,12 @@ recipients: &recipients
   - age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 creation_rules:
-  # protected-path: secrets/
-  - path_regex: '^secrets[\\/].*$'
-    age: *recipients
-
   # protected-path: appsettings.json
   - path_regex: '^appsettings\.json$'
+    age: *recipients
+
+  # protected-path: secrets/
+  - path_regex: '^secrets[\\/].*$'
     age: *recipients
 
   # protected-path: src/Web/appsettings.Production.json
@@ -108,7 +108,7 @@ The separator expression `[\\/]` allows both `/` and `\`. Existing managed polic
 
 ## Named recipient groups
 
-Use groups when people need different decryption access. Selecting `--group default` in a repository with one shared list keeps that list. Creating the first non-default group carries the existing recipients into `default`. Supply each person's public age key in place of the placeholders below. Include your own public key in each group you need to decrypt.
+Use groups when people need different decryption access. Group names and the public keys in each group are sorted alphabetically. Literal paths are also sorted by name, with children before their enclosing directories. Wildcards follow the literal paths in matching priority order. Selecting `--group default` in a repository with one shared list keeps that list. Creating the first non-default group carries the existing recipients into `default`. Supply each person's public age key in place of the placeholders below. Include your own public key in each group you need to decrypt.
 
 ```sh
 git-sops group set certificates YOUR_AGE_KEY ALICE_AGE_KEY --commit

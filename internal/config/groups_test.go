@@ -72,6 +72,20 @@ func TestGroupedGlobsFollowSOPSPrecedence(t *testing.T) {
 	}
 }
 
+func TestGroupedSortPreservesOverlappingRules(t *testing.T) {
+	specs, err := BuildSpecs(t.TempDir(), []string{"z", "folder/", "x*.env", "folder/z.env", "*x.env", "folder.bak", "folder/a/", "folder/a/b", "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, spec := range orderedSpecs(specs, true) {
+		paths = append(paths, spec.policyPath())
+	}
+	if got := strings.Join(paths, ","); got != "a,folder.bak,folder/a/b,folder/a/,folder/z.env,folder/,z,x*.env,*x.env" {
+		t.Fatalf("unexpected group rule order: %s", got)
+	}
+}
+
 func TestGroupedPolicyRejectsAmbiguousOrIncompleteRules(t *testing.T) {
 	root := t.TempDir()
 	id, err := age.GenerateX25519Identity()
